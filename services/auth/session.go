@@ -4,11 +4,11 @@
 package auth
 
 import (
-	"context"
 	"net/http"
 
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/log"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/session"
 )
 
 // Ensure the struct implements the interface.
@@ -29,40 +29,46 @@ func (s *Session) Name() string {
 // object for that uid.
 // Returns nil if there is no user uid stored in the session.
 func (s *Session) Verify(req *http.Request, w http.ResponseWriter, store DataStore, sess SessionStore) (*user_model.User, error) {
-	user := SessionUser(req.Context(), sess)
-	if user != nil {
-		return user, nil
-	}
-	return nil, nil
-}
-
-// SessionUser returns the user object corresponding to the "uid" session variable.
-func SessionUser(ctx context.Context, sess SessionStore) *user_model.User {
 	if sess == nil {
-		return nil
+		return nil, nil //nolint:nilnil // the auth method is not applicable
 	}
 
-	// Get user ID
-	uid := sess.Get("uid")
-	if uid == nil {
-		return nil
-	}
-	log.Trace("Session Authorization: Found user[%d]", uid)
-
-	id, ok := uid.(int64)
+	// Get session user ID
+	uid, ok := sess.Get(session.KeyUID).(int64)
 	if !ok {
-		return nil
+		return nil, nil //nolint:nilnil // the auth method is not applicable
 	}
 
 	// Get user object
-	user, err := user_model.GetUserByID(ctx, id)
+	user, err := user_model.GetUserByID(req.Context(), uid)
 	if err != nil {
 		if !user_model.IsErrUserNotExist(err) {
-			log.Error("GetUserById: %v", err)
+			log.Error("GetUserByID: %v", err)
+			// Return the err as-is to keep current signed-in session, in case the err is something like context.Canceled. Otherwise non-existing user (nil, nil) will make the caller clear the signed-in session.
+			return nil, err
 		}
-		return nil
+		return nil, nil //nolint:nilnil // the auth method is not applicable
+	}
+
+	// sessions can't be enumerated per user, so one opened before a conversion to bot is rejected here
+	if !user.IsIndividual() {
+		log.Trace("Session Authorization: user %-v is not an individual, ignoring the session", user)
+		return nil, nil //nolint:nilnil // the auth method is not applicable
 	}
 
 	log.Trace("Session Authorization: Logged in user %-v", user)
-	return user
+	return user, nil
+}
+
+func ClearSessionKeysForSignIn(sess SessionStore) {
+	_ = sess.Delete("openid_verified_uri")
+	_ = sess.Delete("openid_signin_remember")
+	_ = sess.Delete("openid_determined_email")
+	_ = sess.Delete("openid_determined_username")
+	_ = sess.Delete("twofaUid")
+	_ = sess.Delete("twofaRemember")
+	_ = sess.Delete("webauthnAssertion")
+	_ = sess.Delete("linkAccount")
+	_ = sess.Delete("linkAccountData")
+	_ = sess.Delete("openidPendingURI")
 }

@@ -12,10 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/models/db"
+	"gitea.dev/models/unittest"
+	"gitea.dev/modules/setting"
 
 	"github.com/42wim/sshsig"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_SSHParsePublicKey(t *testing.T) {
@@ -26,7 +29,6 @@ func Test_SSHParsePublicKey(t *testing.T) {
 		length        int
 		content       string
 	}{
-		{"dsa-1024", false, "dsa", 1024, "ssh-dss AAAAB3NzaC1kc3MAAACBAOChCC7lf6Uo9n7BmZ6M8St19PZf4Tn59NriyboW2x/DZuYAz3ibZ2OkQ3S0SqDIa0HXSEJ1zaExQdmbO+Ux/wsytWZmCczWOVsaszBZSl90q8UnWlSH6P+/YA+RWJm5SFtuV9PtGIhyZgoNuz5kBQ7K139wuQsecdKktISwTakzAAAAFQCzKsO2JhNKlL+wwwLGOcLffoAmkwAAAIBpK7/3xvduajLBD/9vASqBQIHrgK2J+wiQnIb/Wzy0UsVmvfn8A+udRbBo+csM8xrSnlnlJnjkJS3qiM5g+eTwsLIV1IdKPEwmwB+VcP53Cw6lSyWyJcvhFb0N6s08NZysLzvj0N+ZC/FnhKTLzIyMtkHf/IrPCwlM+pV/M/96YgAAAIEAqQcGn9CKgzgPaguIZooTAOQdvBLMI5y0bQjOW6734XOpqQGf/Kra90wpoasLKZjSYKNPjE+FRUOrStLrxcNs4BeVKhy2PYTRnybfYVk1/dmKgH6P1YSRONsGKvTsH6c5IyCRG0ncCgYeF8tXppyd642982daopE7zQ/NPAnJfag= nocomment"},
 		{"rsa-1024", false, "rsa", 1024, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDAu7tvIvX6ZHrRXuZNfkR3XLHSsuCK9Zn3X58lxBcQzuo5xZgB6vRwwm/QtJuF+zZPtY5hsQILBLmF+BZ5WpKZp1jBeSjH2G7lxet9kbcH+kIVj0tPFEoyKI9wvWqIwC4prx/WVk2wLTJjzBAhyNxfEq7C9CeiX9pQEbEqJfkKCQ== nocomment\n"},
 		{"rsa-2048", false, "rsa", 2048, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDMZXh+1OBUwSH9D45wTaxErQIN9IoC9xl7MKJkqvTvv6O5RR9YW/IK9FbfjXgXsppYGhsCZo1hFOOsXHMnfOORqu/xMDx4yPuyvKpw4LePEcg4TDipaDFuxbWOqc/BUZRZcXu41QAWfDLrInwsltWZHSeG7hjhpacl4FrVv9V1pS6Oc5Q1NxxEzTzuNLS/8diZrTm/YAQQ/+B+mzWI3zEtF4miZjjAljWd1LTBPvU23d29DcBmmFahcZ441XZsTeAwGxG/Q6j8NgNXj9WxMeWwxXV2jeAX/EBSpZrCVlCQ1yJswT6xCp8TuBnTiGWYMBNTbOZvPC4e0WI2/yZW/s5F nocomment"},
 		{"ecdsa-256", false, "ecdsa", 256, "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFQacN3PrOll7PXmN5B/ZNVahiUIqI05nbBlZk1KXsO3d06ktAWqbNflv2vEmA38bTFTfJ2sbn2B5ksT52cDDbA= nocomment"},
@@ -41,29 +43,7 @@ func Test_SSHParsePublicKey(t *testing.T) {
 				keyTypeN, lengthN, err := SSHNativeParsePublicKey(tc.content)
 				assert.NoError(t, err)
 				assert.Equal(t, tc.keyType, keyTypeN)
-				assert.EqualValues(t, tc.length, lengthN)
-			})
-			if tc.skipSSHKeygen {
-				return
-			}
-			t.Run("SSHKeygen", func(t *testing.T) {
-				keyTypeK, lengthK, err := SSHKeyGenParsePublicKey(tc.content)
-				if err != nil {
-					// Some servers do not support ecdsa format.
-					if !strings.Contains(err.Error(), "line 1 too long:") {
-						assert.FailNow(t, "%v", err)
-					}
-				}
-				assert.Equal(t, tc.keyType, keyTypeK)
-				assert.EqualValues(t, tc.length, lengthK)
-			})
-			t.Run("SSHParseKeyNative", func(t *testing.T) {
-				keyTypeK, lengthK, err := SSHNativeParsePublicKey(tc.content)
-				if err != nil {
-					assert.FailNow(t, "%v", err)
-				}
-				assert.Equal(t, tc.keyType, keyTypeK)
-				assert.EqualValues(t, tc.length, lengthK)
+				assert.Equal(t, tc.length, lengthN)
 			})
 		})
 	}
@@ -170,7 +150,6 @@ func Test_calcFingerprint(t *testing.T) {
 		fp            string
 		content       string
 	}{
-		{"dsa-1024", false, "SHA256:fSIHQlpKMDsGPVAXI8BPYfRp+e2sfvSt1sMrPsFiXrc", "ssh-dss AAAAB3NzaC1kc3MAAACBAOChCC7lf6Uo9n7BmZ6M8St19PZf4Tn59NriyboW2x/DZuYAz3ibZ2OkQ3S0SqDIa0HXSEJ1zaExQdmbO+Ux/wsytWZmCczWOVsaszBZSl90q8UnWlSH6P+/YA+RWJm5SFtuV9PtGIhyZgoNuz5kBQ7K139wuQsecdKktISwTakzAAAAFQCzKsO2JhNKlL+wwwLGOcLffoAmkwAAAIBpK7/3xvduajLBD/9vASqBQIHrgK2J+wiQnIb/Wzy0UsVmvfn8A+udRbBo+csM8xrSnlnlJnjkJS3qiM5g+eTwsLIV1IdKPEwmwB+VcP53Cw6lSyWyJcvhFb0N6s08NZysLzvj0N+ZC/FnhKTLzIyMtkHf/IrPCwlM+pV/M/96YgAAAIEAqQcGn9CKgzgPaguIZooTAOQdvBLMI5y0bQjOW6734XOpqQGf/Kra90wpoasLKZjSYKNPjE+FRUOrStLrxcNs4BeVKhy2PYTRnybfYVk1/dmKgH6P1YSRONsGKvTsH6c5IyCRG0ncCgYeF8tXppyd642982daopE7zQ/NPAnJfag= nocomment"},
 		{"rsa-1024", false, "SHA256:vSnDkvRh/xM6kMxPidLgrUhq3mCN7CDaronCEm2joyQ", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDAu7tvIvX6ZHrRXuZNfkR3XLHSsuCK9Zn3X58lxBcQzuo5xZgB6vRwwm/QtJuF+zZPtY5hsQILBLmF+BZ5WpKZp1jBeSjH2G7lxet9kbcH+kIVj0tPFEoyKI9wvWqIwC4prx/WVk2wLTJjzBAhyNxfEq7C9CeiX9pQEbEqJfkKCQ== nocomment\n"},
 		{"rsa-2048", false, "SHA256:ZHD//a1b9VuTq9XSunAeYjKeU1xDa2tBFZYrFr2Okkg", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDMZXh+1OBUwSH9D45wTaxErQIN9IoC9xl7MKJkqvTvv6O5RR9YW/IK9FbfjXgXsppYGhsCZo1hFOOsXHMnfOORqu/xMDx4yPuyvKpw4LePEcg4TDipaDFuxbWOqc/BUZRZcXu41QAWfDLrInwsltWZHSeG7hjhpacl4FrVv9V1pS6Oc5Q1NxxEzTzuNLS/8diZrTm/YAQQ/+B+mzWI3zEtF4miZjjAljWd1LTBPvU23d29DcBmmFahcZ441XZsTeAwGxG/Q6j8NgNXj9WxMeWwxXV2jeAX/EBSpZrCVlCQ1yJswT6xCp8TuBnTiGWYMBNTbOZvPC4e0WI2/yZW/s5F nocomment"},
 		{"ecdsa-256", false, "SHA256:Bqx/xgWqRKLtkZ0Lr4iZpgb+5lYsFpSwXwVZbPwuTRw", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFQacN3PrOll7PXmN5B/ZNVahiUIqI05nbBlZk1KXsO3d06ktAWqbNflv2vEmA38bTFTfJ2sbn2B5ksT52cDDbA= nocomment"},
@@ -185,14 +164,6 @@ func Test_calcFingerprint(t *testing.T) {
 				fpN, err := calcFingerprintNative(tc.content)
 				assert.NoError(t, err)
 				assert.Equal(t, tc.fp, fpN)
-			})
-			if tc.skipSSHKeygen {
-				return
-			}
-			t.Run("SSHKeygen", func(t *testing.T) {
-				fpK, err := calcFingerprintSSHKeygen(tc.content)
-				assert.NoError(t, err)
-				assert.Equal(t, tc.fp, fpK)
 			})
 		})
 	}
@@ -502,4 +473,36 @@ func runErr(t *testing.T, stdin []byte, args ...string) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+}
+
+func TestPublicKeysAreExternallyManaged(t *testing.T) {
+	key1 := unittest.AssertExistsAndLoadBean(t, &PublicKey{ID: 1})
+	externals, err := PublicKeysAreExternallyManaged(t.Context(), []*PublicKey{key1})
+	assert.NoError(t, err)
+	assert.Len(t, externals, 1)
+	assert.False(t, externals[0])
+}
+
+func TestSearchPrincipalKeyIgnoresOtherKeyTypes(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+	userKey := unittest.AssertExistsAndLoadBean(t, &PublicKey{ID: 1})
+
+	_, err := SearchPrincipalKey(t.Context(), userKey.Content)
+	assert.True(t, IsErrKeyNotExist(err))
+
+	principal := &PublicKey{OwnerID: 1, Name: userKey.Content, Content: userKey.Content, Type: KeyTypePrincipal}
+	require.NoError(t, db.Insert(t.Context(), principal))
+	key, err := SearchPrincipalKey(t.Context(), userKey.Content)
+	require.NoError(t, err)
+	assert.Equal(t, principal.ID, key.ID)
+}
+
+// TestCheckPublicKeyStringOversized tests if oversized SSH2 public key strings are rejected before triggering costly operations.
+func TestCheckPublicKeyStringOversized(t *testing.T) {
+	_, err := parseKeyString(strings.Repeat("a", maxKeyContentBytes+1))
+	assert.ErrorContains(t, err, "SSH public key content is too long")
+
+	content := "---- BEGIN SSH2 PUBLIC KEY ----\n" + strings.Repeat("a", maxKeyContentBase64Bytes+1) + "\n--- END SSH2 PUBLIC KEY ----"
+	_, err = parseKeyString(content)
+	assert.ErrorContains(t, err, "SSH public key base64 is too long")
 }

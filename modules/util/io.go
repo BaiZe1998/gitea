@@ -9,21 +9,28 @@ import (
 	"io"
 )
 
+type NopCloser struct {
+	io.Writer
+}
+
+func (NopCloser) Close() error { return nil }
+
 // ReadAtMost reads at most len(buf) bytes from r into buf.
 // It returns the number of bytes copied. n is only less than len(buf) if r provides fewer bytes.
-// If EOF or ErrUnexpectedEOF occurs while reading, err will be nil.
+// If EOF occurs while reading, err will be nil.
 func ReadAtMost(r io.Reader, buf []byte) (n int, err error) {
-	n, err = io.ReadFull(r, buf)
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		err = nil
+	for n < len(buf) && err == nil {
+		var read int
+		read, err = r.Read(buf[n:])
+		n += read
 	}
-	return n, err
+	return n, Iif(err == io.EOF, nil, err)
 }
 
 // ReadWithLimit reads at most "limit" bytes from r into buf.
-// If EOF or ErrUnexpectedEOF occurs while reading, err will be nil.
+// If EOF occurs while reading, err will be nil.
 func ReadWithLimit(r io.Reader, n int) (buf []byte, err error) {
-	return readWithLimit(r, 1024, n)
+	return readWithLimit(r, 4*1024, n)
 }
 
 func readWithLimit(r io.Reader, batch, limit int) ([]byte, error) {
@@ -43,12 +50,11 @@ func readWithLimit(r io.Reader, batch, limit int) ([]byte, error) {
 		if res.Len()+batch > limit {
 			bufTmp = bufFix[:limit-res.Len()]
 		}
-		n, err := io.ReadFull(r, bufTmp)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			eof = true
-		} else if err != nil {
+		n, err := ReadAtMost(r, bufTmp)
+		if err != nil {
 			return nil, err
 		}
+		eof = n != len(bufTmp)
 		if _, err = res.Write(bufTmp[:n]); err != nil {
 			return nil, err
 		}

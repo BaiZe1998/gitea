@@ -5,11 +5,12 @@ package issues
 
 import (
 	"context"
+	"strconv"
 
-	"code.gitea.io/gitea/models/db"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/markup/markdown"
+	"gitea.dev/models/db"
+	"gitea.dev/models/renderhelper"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/markup/markdown"
 
 	"xorm.io/builder"
 )
@@ -74,6 +75,18 @@ func findCodeComments(ctx context.Context, opts FindCommentsOptions, issue *Issu
 		return nil, err
 	}
 
+	if err := comments.LoadAttachments(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := comments.loadResolveDoers(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := comments.loadReactions(ctx, issue.Repo); err != nil {
+		return nil, err
+	}
+
 	// Find all reviews by ReviewID
 	reviews := make(map[int64]*Review)
 	ids := make([]int64, 0, len(comments))
@@ -82,8 +95,10 @@ func findCodeComments(ctx context.Context, opts FindCommentsOptions, issue *Issu
 			ids = append(ids, comment.ReviewID)
 		}
 	}
-	if err := e.In("id", ids).Find(&reviews); err != nil {
-		return nil, err
+	if len(ids) > 0 {
+		if err := e.In("id", ids).Find(&reviews); err != nil {
+			return nil, err
+		}
 	}
 
 	n := 0
@@ -95,26 +110,16 @@ func findCodeComments(ctx context.Context, opts FindCommentsOptions, issue *Issu
 				continue
 			}
 			comment.Review = re
+			comment.Issue = issue
 		}
 		comments[n] = comment
 		n++
 
-		if err := comment.LoadResolveDoer(ctx); err != nil {
-			return nil, err
-		}
-
-		if err := comment.LoadReactions(ctx, issue.Repo); err != nil {
-			return nil, err
-		}
-
 		var err error
-		if comment.RenderedContent, err = markdown.RenderString(&markup.RenderContext{
-			Ctx: ctx,
-			Links: markup.Links{
-				Base: issue.Repo.Link(),
-			},
-			Metas: issue.Repo.ComposeMetas(ctx),
-		}, comment.Content); err != nil {
+		rctx := renderhelper.NewRenderContextRepoComment(ctx, issue.Repo, renderhelper.RepoCommentOptions{
+			FootnoteContextID: strconv.FormatInt(comment.ID, 10),
+		})
+		if comment.RenderedContent, err = markdown.RenderString(rctx, comment.Content); err != nil {
 			return nil, err
 		}
 	}
@@ -122,7 +127,7 @@ func findCodeComments(ctx context.Context, opts FindCommentsOptions, issue *Issu
 }
 
 // FetchCodeCommentsByLine fetches the code comments for a given treePath and line number
-func FetchCodeCommentsByLine(ctx context.Context, issue *Issue, currentUser *user_model.User, treePath string, line int64, showOutdatedComments bool) ([]*Comment, error) {
+func FetchCodeCommentsByLine(ctx context.Context, issue *Issue, currentUser *user_model.User, treePath string, line int64, showOutdatedComments bool) (CommentList, error) {
 	opts := FindCommentsOptions{
 		Type:     CommentTypeCode,
 		IssueID:  issue.ID,

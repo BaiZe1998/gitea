@@ -4,7 +4,7 @@
 package actions
 
 import (
-	actions_model "code.gitea.io/gitea/models/actions"
+	actions_model "gitea.dev/models/actions"
 )
 
 const (
@@ -17,9 +17,37 @@ func FullSteps(task *actions_model.ActionTask) []*actions_model.ActionTaskStep {
 	if len(task.Steps) == 0 {
 		return fullStepsOfEmptySteps(task)
 	}
+	if task.Steps[0].IsReported() {
+		return task.Steps // the runner reports its own setup and cleanup steps
+	}
 
-	firstStep := task.Steps[0]
+	// firstStep is the first step that has run or running, not include preStep.
+	// For example,
+	// 1. preStep(Success) -> step1(Success) -> step2(Running) -> step3(Waiting) -> postStep(Waiting): firstStep is step1.
+	// 2. preStep(Success) -> step1(Skipped) -> step2(Success) -> postStep(Success): firstStep is step2.
+	// 3. preStep(Success) -> step1(Running) -> step2(Waiting) -> postStep(Waiting): firstStep is step1.
+	// 4. preStep(Success) -> step1(Skipped) -> step2(Skipped) -> postStep(Skipped): firstStep is nil.
+	// 5. preStep(Success) -> step1(Cancelled) -> step2(Cancelled) -> postStep(Cancelled): firstStep is nil.
+	var firstStep *actions_model.ActionTaskStep
+	// lastHasRunStep is the last step that has run.
+	// For example,
+	// 1. preStep(Success) -> step1(Success) -> step2(Running) -> step3(Waiting) -> postStep(Waiting): lastHasRunStep is step1.
+	// 2. preStep(Success) -> step1(Success) -> step2(Success) -> step3(Success) -> postStep(Success): lastHasRunStep is step3.
+	// 3. preStep(Success) -> step1(Success) -> step2(Failure) -> step3(Waiting) -> postStep(Waiting): lastHasRunStep is step2.
+	// 4. preStep(Success) -> step1(Success) -> step2(Skipped) -> postStep(Success): lastHasRunStep is step1, because a skipped step never ran.
+	// So its Stopped is the Started of postStep once no step is left to run.
+	var lastHasRunStep *actions_model.ActionTaskStep
+
 	var logIndex int64
+	for _, step := range task.Steps {
+		if firstStep == nil && (step.Status.HasRun() || step.Status.IsRunning()) {
+			firstStep = step
+		}
+		if step.Status.HasRun() {
+			lastHasRunStep = step
+		}
+		logIndex += step.LogLength
+	}
 
 	preStep := &actions_model.ActionTaskStep{
 		Name:      preStepName,
@@ -28,23 +56,17 @@ func FullSteps(task *actions_model.ActionTask) []*actions_model.ActionTaskStep {
 		Status:    actions_model.StatusRunning,
 	}
 
-	if firstStep.Status.HasRun() || firstStep.Status.IsRunning() {
+	// No step has run or is running, so preStep is equal to the task
+	if firstStep == nil {
+		preStep.Stopped = task.Stopped
+		preStep.Status = task.Status
+	} else {
 		preStep.LogLength = firstStep.LogIndex
 		preStep.Stopped = firstStep.Started
 		preStep.Status = actions_model.StatusSuccess
-	} else if task.Status.IsDone() {
-		preStep.Stopped = task.Stopped
-		preStep.Status = actions_model.StatusFailure
 	}
 	logIndex += preStep.LogLength
 
-	var lastHasRunStep *actions_model.ActionTaskStep
-	for _, step := range task.Steps {
-		if step.Status.HasRun() {
-			lastHasRunStep = step
-		}
-		logIndex += step.LogLength
-	}
 	if lastHasRunStep == nil {
 		lastHasRunStep = preStep
 	}
@@ -53,11 +75,15 @@ func FullSteps(task *actions_model.ActionTask) []*actions_model.ActionTaskStep {
 		Name:   postStepName,
 		Status: actions_model.StatusWaiting,
 	}
-	if task.Status.IsDone() {
+	// If no step is left to run, or the lastHasRunStep has failed, postStep has started.
+	if lastHasRunStep.Status.IsFailure() || task.Steps[len(task.Steps)-1].Status.IsDone() {
 		postStep.LogIndex = logIndex
 		postStep.LogLength = task.LogLength - postStep.LogIndex
-		postStep.Status = task.Status
 		postStep.Started = lastHasRunStep.Stopped
+		postStep.Status = actions_model.StatusRunning
+	}
+	if task.Status.IsDone() {
+		postStep.Status = task.Status
 		postStep.Stopped = task.Stopped
 	}
 	ret := make([]*actions_model.ActionTaskStep, 0, len(task.Steps)+2)

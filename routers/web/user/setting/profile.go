@@ -14,29 +14,32 @@ import (
 	"path/filepath"
 	"strings"
 
-	"code.gitea.io/gitea/models/avatars"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/organization"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/translation"
-	"code.gitea.io/gitea/modules/typesniffer"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/modules/web/middleware"
-	"code.gitea.io/gitea/services/forms"
-	user_service "code.gitea.io/gitea/services/user"
+	"gitea.dev/models/db"
+	"gitea.dev/models/organization"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git/gitrepo"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/translation"
+	"gitea.dev/modules/typesniffer"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/web"
+	"gitea.dev/modules/web/middleware"
+	"gitea.dev/services/context"
+	"gitea.dev/services/forms"
+	user_service "gitea.dev/services/user"
+	"gitea.dev/services/webtheme"
 )
 
 const (
-	tplSettingsProfile      base.TplName = "user/settings/profile"
-	tplSettingsAppearance   base.TplName = "user/settings/appearance"
-	tplSettingsOrganization base.TplName = "user/settings/organization"
-	tplSettingsRepositories base.TplName = "user/settings/repos"
+	tplSettingsProfile      templates.TplName = "user/settings/profile"
+	tplSettingsAppearance   templates.TplName = "user/settings/appearance"
+	tplSettingsOrganization templates.TplName = "user/settings/organization"
+	tplSettingsRepositories templates.TplName = "user/settings/repos"
 )
 
 // Profile render user's profile page
@@ -49,41 +52,9 @@ func Profile(ctx *context.Context) {
 	ctx.HTML(http.StatusOK, tplSettingsProfile)
 }
 
-// HandleUsernameChange handle username changes from user settings and admin interface
-func HandleUsernameChange(ctx *context.Context, user *user_model.User, newName string) error {
-	oldName := user.Name
-	// rename user
-	if err := user_service.RenameUser(ctx, user, newName); err != nil {
-		switch {
-		// Noop as username is not changed
-		case user_model.IsErrUsernameNotChanged(err):
-			ctx.Flash.Error(ctx.Tr("form.username_has_not_been_changed"))
-		// Non-local users are not allowed to change their username.
-		case user_model.IsErrUserIsNotLocal(err):
-			ctx.Flash.Error(ctx.Tr("form.username_change_not_local_user"))
-		case user_model.IsErrUserAlreadyExist(err):
-			ctx.Flash.Error(ctx.Tr("form.username_been_taken"))
-		case user_model.IsErrEmailAlreadyUsed(err):
-			ctx.Flash.Error(ctx.Tr("form.email_been_used"))
-		case db.IsErrNameReserved(err):
-			ctx.Flash.Error(ctx.Tr("user.form.name_reserved", newName))
-		case db.IsErrNamePatternNotAllowed(err):
-			ctx.Flash.Error(ctx.Tr("user.form.name_pattern_not_allowed", newName))
-		case db.IsErrNameCharsNotAllowed(err):
-			ctx.Flash.Error(ctx.Tr("user.form.name_chars_not_allowed", newName))
-		default:
-			ctx.ServerError("ChangeUserName", err)
-		}
-		return err
-	}
-	log.Trace("User name changed: %s -> %s", oldName, newName)
-	return nil
-}
-
 // ProfilePost response for change user's profile
 func ProfilePost(ctx *context.Context) {
-	form := web.GetForm(ctx).(*forms.UpdateProfileForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsProfile"] = true
 	ctx.Data["AllowedUserVisibilityModes"] = setting.Service.AllowedUserVisibilityModesSlice.ToVisibleTypeSlice()
 	ctx.Data["DisableGravatar"] = setting.Config().Picture.DisableGravatar.Value(ctx)
@@ -93,29 +64,54 @@ func ProfilePost(ctx *context.Context) {
 		return
 	}
 
-	if len(form.Name) != 0 && ctx.Doer.Name != form.Name {
-		log.Debug("Changing name for %s to %s", ctx.Doer.Name, form.Name)
-		if err := HandleUsernameChange(ctx, ctx.Doer, form.Name); err != nil {
+	form := web.GetForm[*forms.UpdateProfileForm](ctx)
+
+	if form.Name != "" {
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureChangeUsername) {
+			ctx.Flash.Error(ctx.Tr("user.form.change_username_disabled"))
 			ctx.Redirect(setting.AppSubURL + "/user/settings")
 			return
 		}
-		ctx.Doer.Name = form.Name
-		ctx.Doer.LowerName = strings.ToLower(form.Name)
+		if err := user_service.RenameUser(ctx, ctx.Doer, form.Name, ctx.Doer); err != nil {
+			switch {
+			case user_model.IsErrUserIsNotLocal(err):
+				ctx.Flash.Error(ctx.Tr("form.username_change_not_local_user"))
+			case user_model.IsErrUserAlreadyExist(err):
+				ctx.Flash.Error(ctx.Tr("form.username_been_taken"))
+			case db.IsErrNameReserved(err):
+				ctx.Flash.Error(ctx.Tr("user.form.name_reserved", form.Name))
+			case db.IsErrNamePatternNotAllowed(err):
+				ctx.Flash.Error(ctx.Tr("user.form.name_pattern_not_allowed", form.Name))
+			case db.IsErrNameCharsNotAllowed(err):
+				ctx.Flash.Error(ctx.Tr("user.form.name_chars_not_allowed", form.Name))
+			default:
+				ctx.ServerError("RenameUser", err)
+				return
+			}
+			ctx.Redirect(setting.AppSubURL + "/user/settings")
+			return
+		}
 	}
 
-	ctx.Doer.FullName = form.FullName
-	ctx.Doer.KeepEmailPrivate = form.KeepEmailPrivate
-	ctx.Doer.Website = form.Website
-	ctx.Doer.Location = form.Location
-	ctx.Doer.Description = form.Description
-	ctx.Doer.KeepActivityPrivate = form.KeepActivityPrivate
-	ctx.Doer.Visibility = form.Visibility
-	if err := user_model.UpdateUserSetting(ctx, ctx.Doer); err != nil {
-		if _, ok := err.(user_model.ErrEmailAlreadyUsed); ok {
-			ctx.Flash.Error(ctx.Tr("form.email_been_used"))
+	opts := &user_service.UpdateOptions{
+		KeepEmailPrivate:    optional.Some(form.KeepEmailPrivate),
+		Description:         optional.Some(form.Description),
+		Website:             optional.Some(form.Website),
+		Location:            optional.Some(form.Location),
+		Visibility:          optional.Some(form.Visibility),
+		KeepActivityPrivate: optional.Some(form.KeepActivityPrivate),
+	}
+
+	if form.FullName != "" {
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureChangeFullName) {
+			ctx.Flash.Error(ctx.Tr("user.form.change_full_name_disabled"))
 			ctx.Redirect(setting.AppSubURL + "/user/settings")
 			return
 		}
+		opts.FullName = optional.Some(form.FullName)
+	}
+
+	if err := user_service.UpdateUser(ctx, ctx.Doer, opts); err != nil {
 		ctx.ServerError("UpdateUser", err)
 		return
 	}
@@ -130,11 +126,7 @@ func ProfilePost(ctx *context.Context) {
 func UpdateAvatarSetting(ctx *context.Context, form *forms.AvatarForm, ctxUser *user_model.User) error {
 	ctxUser.UseCustomAvatar = form.Source == forms.AvatarLocal
 	if len(form.Gravatar) > 0 {
-		if form.Avatar != nil {
-			ctxUser.Avatar = avatars.HashEmail(form.Gravatar)
-		} else {
-			ctxUser.Avatar = ""
-		}
+		ctxUser.Avatar = "" // UploadAvatar sets the real storage path when a file is uploaded
 		ctxUser.AvatarEmail = form.Gravatar
 	}
 
@@ -146,7 +138,7 @@ func UpdateAvatarSetting(ctx *context.Context, form *forms.AvatarForm, ctxUser *
 		defer fr.Close()
 
 		if form.Avatar.Size > setting.Avatar.MaxFileSize {
-			return errors.New(ctx.Tr("settings.uploaded_avatar_is_too_big", form.Avatar.Size/1024, setting.Avatar.MaxFileSize/1024))
+			return errors.New(ctx.Locale.TrString("settings.uploaded_avatar_is_too_big", form.Avatar.Size/1024, setting.Avatar.MaxFileSize/1024))
 		}
 
 		data, err := io.ReadAll(fr)
@@ -156,7 +148,7 @@ func UpdateAvatarSetting(ctx *context.Context, form *forms.AvatarForm, ctxUser *
 
 		st := typesniffer.DetectContentType(data)
 		if !(st.IsImage() && !st.IsSvgImage()) {
-			return errors.New(ctx.Tr("settings.uploaded_avatar_not_a_image"))
+			return errors.New(ctx.Locale.TrString("settings.uploaded_avatar_not_a_image"))
 		}
 		if err = user_service.UploadAvatar(ctx, ctxUser, data); err != nil {
 			return fmt.Errorf("UploadAvatar: %w", err)
@@ -170,7 +162,7 @@ func UpdateAvatarSetting(ctx *context.Context, form *forms.AvatarForm, ctxUser *
 	}
 
 	if err := user_model.UpdateUserCols(ctx, ctxUser, "avatar", "avatar_email", "use_custom_avatar"); err != nil {
-		return fmt.Errorf("UpdateUser: %w", err)
+		return fmt.Errorf("UpdateUserCols: %w", err)
 	}
 
 	return nil
@@ -178,7 +170,7 @@ func UpdateAvatarSetting(ctx *context.Context, form *forms.AvatarForm, ctxUser *
 
 // AvatarPost response for change user's avatar request
 func AvatarPost(ctx *context.Context) {
-	form := web.GetForm(ctx).(*forms.AvatarForm)
+	form := web.GetForm[*forms.AvatarForm](ctx)
 	if err := UpdateAvatarSetting(ctx, form, ctx.Doer); err != nil {
 		ctx.Flash.Error(err.Error())
 	} else {
@@ -207,8 +199,8 @@ func Organization(ctx *context.Context) {
 			PageSize: setting.UI.Admin.UserPagingNum,
 			Page:     ctx.FormInt("page"),
 		},
-		UserID:         ctx.Doer.ID,
-		IncludePrivate: ctx.IsSigned,
+		UserID:            ctx.Doer.ID,
+		IncludeVisibility: structs.VisibleTypePrivate,
 	}
 
 	if opts.Page <= 0 {
@@ -222,8 +214,7 @@ func Organization(ctx *context.Context) {
 	}
 
 	ctx.Data["Orgs"] = orgs
-	pager := context.NewPagination(int(total), opts.PageSize, opts.Page, 5)
-	pager.SetDefaultParams(ctx)
+	pager := context.NewPagerBuilder(ctx).TotalCount(total).PerPageLimit(opts.PageSize).CurPage(opts.Page).Build()
 	ctx.Data["Page"] = pager
 	ctx.HTML(http.StatusOK, tplSettingsOrganization)
 }
@@ -243,19 +234,19 @@ func Repos(ctx *context.Context) {
 	if opts.Page <= 0 {
 		opts.Page = 1
 	}
-	start := (opts.Page - 1) * opts.PageSize
-	end := start + opts.PageSize
+	start := int64((opts.Page - 1) * opts.PageSize)
+	end := start + int64(opts.PageSize)
 
 	adoptOrDelete := ctx.IsUserSiteAdmin() || (setting.Repository.AllowAdoptionOfUnadoptedRepositories && setting.Repository.AllowDeleteOfUnadoptedRepositories)
 
 	ctxUser := ctx.Doer
-	count := 0
+	var count int64
 
 	if adoptOrDelete {
 		repoNames := make([]string, 0, setting.UI.Admin.UserPagingNum)
 		repos := map[string]*repo_model.Repository{}
 		// We're going to iterate by pagesize.
-		root := user_model.UserPath(ctxUser.Name)
+		root := gitrepo.UserLocalPath(ctxUser.Name)
 		if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -284,8 +275,8 @@ func Repos(ctx *context.Context) {
 			return
 		}
 
-		userRepos, _, err := repo_model.GetUserRepositories(ctx, &repo_model.SearchRepoOptions{
-			Actor:   ctxUser,
+		userRepos, _, err := repo_model.GetUserRepositories(ctx, repo_model.SearchRepoOptions{
+			OwnerID: ctxUser.ID,
 			Private: true,
 			ListOptions: db.ListOptions{
 				Page:     1,
@@ -309,12 +300,12 @@ func Repos(ctx *context.Context) {
 		ctx.Data["Dirs"] = repoNames
 		ctx.Data["ReposMap"] = repos
 	} else {
-		repos, count64, err := repo_model.GetUserRepositories(ctx, &repo_model.SearchRepoOptions{Actor: ctxUser, Private: true, ListOptions: opts})
+		repos, reposCount, err := repo_model.GetUserRepositories(ctx, repo_model.SearchRepoOptions{OwnerID: ctxUser.ID, Private: true, ListOptions: opts})
 		if err != nil {
 			ctx.ServerError("GetUserRepositories", err)
 			return
 		}
-		count = int(count64)
+		count = reposCount
 
 		for i := range repos {
 			if repos[i].IsFork {
@@ -328,8 +319,7 @@ func Repos(ctx *context.Context) {
 		ctx.Data["Repos"] = repos
 	}
 	ctx.Data["ContextUser"] = ctxUser
-	pager := context.NewPagination(count, opts.PageSize, opts.Page, 5)
-	pager.SetDefaultParams(ctx)
+	pager := context.NewPagerBuilder(ctx).TotalCount(count).PerPageLimit(opts.PageSize).CurPage(opts.Page).Build()
 	ctx.Data["Page"] = pager
 	ctx.HTML(http.StatusOK, tplSettingsRepositories)
 }
@@ -338,6 +328,7 @@ func Repos(ctx *context.Context) {
 func Appearance(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("settings.appearance")
 	ctx.Data["PageIsSettingsAppearance"] = true
+	ctx.Data["AllThemes"] = webtheme.GetAvailableThemes()
 
 	var hiddenCommentTypes *big.Int
 	val, err := user_model.GetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyHiddenCommentTypes)
@@ -356,49 +347,53 @@ func Appearance(ctx *context.Context) {
 
 // UpdateUIThemePost is used to update users' specific theme
 func UpdateUIThemePost(ctx *context.Context) {
-	form := web.GetForm(ctx).(*forms.UpdateThemeForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	form := web.GetForm[*forms.UpdateThemeForm](ctx)
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsAppearance"] = true
 
 	if ctx.HasError() {
+		ctx.Flash.Error(ctx.GetErrMsg())
 		ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
 		return
 	}
 
-	if !form.IsThemeExists() {
+	if webtheme.GetThemeMetaInfo(form.Theme) == nil {
 		ctx.Flash.Error(ctx.Tr("settings.theme_update_error"))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
 		return
 	}
 
-	if err := user_model.UpdateUserTheme(ctx, ctx.Doer, form.Theme); err != nil {
+	opts := &user_service.UpdateOptions{
+		Theme: optional.Some(form.Theme),
+	}
+	if err := user_service.UpdateUser(ctx, ctx.Doer, opts); err != nil {
 		ctx.Flash.Error(ctx.Tr("settings.theme_update_error"))
-		ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
-		return
+	} else {
+		ctx.Flash.Success(ctx.Tr("settings.theme_update_success"))
 	}
 
-	log.Trace("Update user theme: %s", ctx.Doer.Name)
-	ctx.Flash.Success(ctx.Tr("settings.theme_update_success"))
 	ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
 }
 
 // UpdateUserLang update a user's language
 func UpdateUserLang(ctx *context.Context) {
-	form := web.GetForm(ctx).(*forms.UpdateLanguageForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	form := web.GetForm[*forms.UpdateLanguageForm](ctx)
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsAppearance"] = true
 
-	if len(form.Language) != 0 {
+	if form.Language != "" {
 		if !util.SliceContainsString(setting.Langs, form.Language) {
 			ctx.Flash.Error(ctx.Tr("settings.update_language_not_found", form.Language))
 			ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
 			return
 		}
-		ctx.Doer.Language = form.Language
 	}
 
-	if err := user_model.UpdateUserSetting(ctx, ctx.Doer); err != nil {
-		ctx.ServerError("UpdateUserSetting", err)
+	opts := &user_service.UpdateOptions{
+		Language: optional.Some(form.Language),
+	}
+	if err := user_service.UpdateUser(ctx, ctx.Doer, opts); err != nil {
+		ctx.ServerError("UpdateUser", err)
 		return
 	}
 
@@ -406,7 +401,7 @@ func UpdateUserLang(ctx *context.Context) {
 	middleware.SetLocaleCookie(ctx.Resp, ctx.Doer.Language, 0)
 
 	log.Trace("User settings updated: %s", ctx.Doer.Name)
-	ctx.Flash.Success(translation.NewLocale(ctx.Doer.Language).Tr("settings.update_language_success"))
+	ctx.Flash.Success(translation.NewLocale(ctx.Doer.Language).TrString("settings.update_language_success"))
 	ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
 }
 

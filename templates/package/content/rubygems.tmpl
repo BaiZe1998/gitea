@@ -3,17 +3,17 @@
 	<div class="ui attached segment">
 		<div class="ui form">
 			<div class="field">
-				<label>{{svg "octicon-terminal"}} {{ctx.Locale.Tr "packages.rubygems.install" | Safe}}:</label>
-				<div class="markup"><pre class="code-block"><code>gem install {{.PackageDescriptor.Package.Name}} --version &quot;{{.PackageDescriptor.Version.Version}}&quot; --source &quot;<gitea-origin-url data-url="{{AppSubUrl}}/api/packages/{{.PackageDescriptor.Owner.Name}}/rubygems"></gitea-origin-url>&quot;</code></pre></div>
+				<label>{{svg "octicon-terminal"}} {{ctx.Locale.Tr "packages.rubygems.install"}}:</label>
+				<div class="markup"><pre class="code-block"><code>gem install {{.PackageDescriptor.Package.Name}} --version &quot;{{.PackageDescriptor.Version.Version}}&quot; --source &quot;{{ctx.AppFullLink}}/api/packages/{{.PackageDescriptor.Owner.Name}}/rubygems&quot;</code></pre></div>
 			</div>
 			<div class="field">
 				<label>{{svg "octicon-code"}} {{ctx.Locale.Tr "packages.rubygems.install2"}}:</label>
-				<div class="markup"><pre class="code-block"><code>source "<gitea-origin-url data-url="{{AppSubUrl}}/api/packages/{{.PackageDescriptor.Owner.Name}}/rubygems"></gitea-origin-url>" do
+				<div class="markup"><pre class="code-block"><code>source "{{ctx.AppFullLink}}/api/packages/{{.PackageDescriptor.Owner.Name}}/rubygems" do
 	gem "{{.PackageDescriptor.Package.Name}}", "{{.PackageDescriptor.Version.Version}}"
 end</code></pre></div>
 			</div>
 			<div class="field">
-				<label>{{ctx.Locale.Tr "packages.registry.documentation" "RubyGems" "https://docs.gitea.com/usage/packages/rubygems/" | Safe}}</label>
+				<label>{{ctx.Locale.Tr "packages.registry.documentation" "RubyGems" "https://docs.gitea.com/usage/packages/rubygems/"}}</label>
 			</div>
 		</div>
 	</div>
@@ -32,8 +32,8 @@ end</code></pre></div>
 		<h4 class="ui top attached header">{{ctx.Locale.Tr "packages.dependencies"}}</h4>
 		<div class="ui attached segment">
 			<div class="ui list">
-				{{template "package/content/rubygems_dependencies" dict "root" $ "dependencies" .PackageDescriptor.Metadata.RuntimeDependencies "title" (ctx.Locale.Tr "packages.rubygems.dependencies.runtime")}}
-				{{template "package/content/rubygems_dependencies" dict "root" $ "dependencies" .PackageDescriptor.Metadata.DevelopmentDependencies "title" (ctx.Locale.Tr "packages.rubygems.dependencies.development")}}
+				{{template "package/content/rubygems_dependencies" dict "dependencies" .PackageDescriptor.Metadata.RuntimeDependencies "title" (ctx.Locale.Tr "packages.rubygems.dependencies.runtime")}}
+				{{template "package/content/rubygems_dependencies" dict "dependencies" .PackageDescriptor.Metadata.DevelopmentDependencies "title" (ctx.Locale.Tr "packages.rubygems.dependencies.development")}}
 			</div>
 		</div>
 	{{end}}

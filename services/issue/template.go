@@ -4,19 +4,20 @@
 package issue
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"net/url"
 	"path"
 	"strings"
 
-	"code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/issue/template"
-	"code.gitea.io/gitea/modules/log"
-	api "code.gitea.io/gitea/modules/structs"
+	"gitea.dev/models/repo"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/issue/template"
+	"gitea.dev/modules/log"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // templateDirCandidates issue templates directory
@@ -47,19 +48,17 @@ func GetDefaultTemplateConfig() api.IssueConfig {
 
 // GetTemplateConfig loads the given issue config file.
 // It never returns a nil config.
-func GetTemplateConfig(gitRepo *git.Repository, path string, commit *git.Commit) (api.IssueConfig, error) {
+func GetTemplateConfig(ctx context.Context, gitRepo *git.Repository, path string, commit *git.Commit) (api.IssueConfig, error) {
 	if gitRepo == nil {
 		return GetDefaultTemplateConfig(), nil
 	}
 
-	var err error
-
-	treeEntry, err := commit.GetTreeEntryByPath(path)
+	treeEntry, err := commit.GetTreeEntryByPath(ctx, gitRepo, path)
 	if err != nil {
 		return GetDefaultTemplateConfig(), err
 	}
 
-	reader, err := treeEntry.Blob().DataAsync()
+	reader, err := treeEntry.Blob(gitRepo).DataAsync(ctx)
 	if err != nil {
 		log.Debug("DataAsync: %v", err)
 		return GetDefaultTemplateConfig(), nil
@@ -67,7 +66,7 @@ func GetTemplateConfig(gitRepo *git.Repository, path string, commit *git.Commit)
 
 	defer reader.Close()
 
-	configContent, err := io.ReadAll(reader)
+	configContent, err := util.ReadWithLimit(reader, 1024*1024)
 	if err != nil {
 		return GetDefaultTemplateConfig(), err
 	}
@@ -109,81 +108,83 @@ func IsTemplateConfig(path string) bool {
 	return false
 }
 
-// GetTemplatesFromDefaultBranch checks for issue templates in the repo's default branch,
-// returns valid templates and the errors of invalid template files.
-func GetTemplatesFromDefaultBranch(repo *repo.Repository, gitRepo *git.Repository) ([]*api.IssueTemplate, map[string]error) {
-	var issueTemplates []*api.IssueTemplate
-
+// ParseTemplatesFromDefaultBranch parses the issue templates in the repo's default branch,
+// returns valid templates and the errors of invalid template files (the errors map is guaranteed to be non-nil).
+func ParseTemplatesFromDefaultBranch(ctx context.Context, repo *repo.Repository, gitRepo *git.Repository) (ret struct {
+	IssueTemplates []*api.IssueTemplate
+	TemplateErrors map[string]error
+},
+) {
+	ret.TemplateErrors = map[string]error{}
 	if repo.IsEmpty {
-		return issueTemplates, nil
+		return ret
 	}
 
-	commit, err := gitRepo.GetBranchCommit(repo.DefaultBranch)
+	commit, err := gitRepo.GetBranchCommit(ctx, repo.DefaultBranch)
 	if err != nil {
-		return issueTemplates, nil
+		return ret
 	}
 
-	invalidFiles := map[string]error{}
 	for _, dirName := range templateDirCandidates {
-		tree, err := commit.SubTree(dirName)
+		tree, err := commit.SubTree(ctx, gitRepo, dirName)
 		if err != nil {
 			log.Debug("get sub tree of %s: %v", dirName, err)
 			continue
 		}
-		entries, err := tree.ListEntries()
+		entries, err := tree.ListEntries(ctx, gitRepo)
 		if err != nil {
 			log.Debug("list entries in %s: %v", dirName, err)
-			return issueTemplates, nil
+			return ret
 		}
 		for _, entry := range entries {
 			if !template.CouldBe(entry.Name()) {
 				continue
 			}
 			fullName := path.Join(dirName, entry.Name())
-			if it, err := template.UnmarshalFromEntry(entry, dirName); err != nil {
-				invalidFiles[fullName] = err
+			if it, err := template.UnmarshalFromEntry(ctx, gitRepo, entry, dirName); err != nil {
+				ret.TemplateErrors[fullName] = err
 			} else {
 				if !strings.HasPrefix(it.Ref, "refs/") { // Assume that the ref intended is always a branch - for tags users should use refs/tags/<ref>
 					it.Ref = git.BranchPrefix + it.Ref
 				}
-				issueTemplates = append(issueTemplates, it)
+				ret.IssueTemplates = append(ret.IssueTemplates, it)
 			}
 		}
 	}
-	return issueTemplates, invalidFiles
+	return ret
 }
 
 // GetTemplateConfigFromDefaultBranch returns the issue config for this repo.
 // It never returns a nil config.
-func GetTemplateConfigFromDefaultBranch(repo *repo.Repository, gitRepo *git.Repository) (api.IssueConfig, error) {
+func GetTemplateConfigFromDefaultBranch(ctx context.Context, repo *repo.Repository, gitRepo *git.Repository) (api.IssueConfig, error) {
 	if repo.IsEmpty {
 		return GetDefaultTemplateConfig(), nil
 	}
 
-	commit, err := gitRepo.GetBranchCommit(repo.DefaultBranch)
+	commit, err := gitRepo.GetBranchCommit(ctx, repo.DefaultBranch)
 	if err != nil {
 		return GetDefaultTemplateConfig(), err
 	}
 
 	for _, configName := range templateConfigCandidates {
-		if _, err := commit.GetTreeEntryByPath(configName + ".yaml"); err == nil {
-			return GetTemplateConfig(gitRepo, configName+".yaml", commit)
+		if _, err := commit.GetTreeEntryByPath(ctx, gitRepo, configName+".yaml"); err == nil {
+			return GetTemplateConfig(ctx, gitRepo, configName+".yaml", commit)
 		}
 
-		if _, err := commit.GetTreeEntryByPath(configName + ".yml"); err == nil {
-			return GetTemplateConfig(gitRepo, configName+".yml", commit)
+		if _, err := commit.GetTreeEntryByPath(ctx, gitRepo, configName+".yml"); err == nil {
+			return GetTemplateConfig(ctx, gitRepo, configName+".yml", commit)
 		}
 	}
 
 	return GetDefaultTemplateConfig(), nil
 }
 
-func HasTemplatesOrContactLinks(repo *repo.Repository, gitRepo *git.Repository) bool {
-	ret, _ := GetTemplatesFromDefaultBranch(repo, gitRepo)
-	if len(ret) > 0 {
+func HasTemplatesOrContactLinks(ctx context.Context, repo *repo.Repository, gitRepo *git.Repository) bool {
+	ret := ParseTemplatesFromDefaultBranch(ctx, repo, gitRepo)
+	if len(ret.IssueTemplates) > 0 {
 		return true
 	}
 
-	issueConfig, _ := GetTemplateConfigFromDefaultBranch(repo, gitRepo)
+	issueConfig, _ := GetTemplateConfigFromDefaultBranch(ctx, repo, gitRepo)
 	return len(issueConfig.ContactLinks) > 0
 }

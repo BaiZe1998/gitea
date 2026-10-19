@@ -7,13 +7,16 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bufio"
+	"cmp"
 	"compress/gzip"
 	"io"
 	"path"
 	"regexp"
 	"strings"
 
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/base"
+	"gitea.dev/modules/packages"
+	"gitea.dev/modules/util"
 )
 
 const (
@@ -34,7 +37,7 @@ var (
 var (
 	fieldPattern         = regexp.MustCompile(`\A\S+:`)
 	namePattern          = regexp.MustCompile(`\A[a-zA-Z][a-zA-Z0-9\.]*[a-zA-Z0-9]\z`)
-	versionPattern       = regexp.MustCompile(`\A[0-9]+(?:[.\-][0-9]+){1,3}\z`)
+	versionPattern       = regexp.MustCompile(`\A[0-9]+(?:[.\-][0-9]+)+\z`)
 	authorReplacePattern = regexp.MustCompile(`[\[\(].+?[\]\)]`)
 )
 
@@ -151,7 +154,7 @@ func ParseDescription(r io.Reader) (*Package, error) {
 		Metadata: &Metadata{},
 	}
 
-	scanner := bufio.NewScanner(r)
+	scanner := bufio.NewScanner(packages.NewLimitedReader(r, packages.MaxMetadataSize))
 
 	var b strings.Builder
 	for scanner.Scan() {
@@ -173,11 +176,11 @@ func ParseDescription(r io.Reader) (*Package, error) {
 		b.WriteString(line)
 	}
 
-	if err := setField(p, b.String()); err != nil {
+	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	if err := scanner.Err(); err != nil {
+	if err := setField(p, b.String()); err != nil {
 		return nil, err
 	}
 
@@ -185,8 +188,6 @@ func ParseDescription(r io.Reader) (*Package, error) {
 }
 
 func setField(p *Package, data string) error {
-	const listDelimiter = ", "
-
 	if data == "" {
 		return nil
 	}
@@ -215,19 +216,19 @@ func setField(p *Package, data string) error {
 	case "Description":
 		p.Metadata.Description = value
 	case "URL":
-		p.Metadata.ProjectURL = splitAndTrim(value, listDelimiter)
+		p.Metadata.ProjectURL = splitAndTrim(value)
 	case "License":
 		p.Metadata.License = value
 	case "Author":
-		p.Metadata.Authors = splitAndTrim(authorReplacePattern.ReplaceAllString(value, ""), listDelimiter)
+		p.Metadata.Authors = splitAndTrim(authorReplacePattern.ReplaceAllString(value, ""))
 	case "Depends":
-		p.Metadata.Depends = splitAndTrim(value, listDelimiter)
+		p.Metadata.Depends = splitAndTrim(value)
 	case "Imports":
-		p.Metadata.Imports = splitAndTrim(value, listDelimiter)
+		p.Metadata.Imports = splitAndTrim(value)
 	case "Suggests":
-		p.Metadata.Suggests = splitAndTrim(value, listDelimiter)
+		p.Metadata.Suggests = splitAndTrim(value)
 	case "LinkingTo":
-		p.Metadata.LinkingTo = splitAndTrim(value, listDelimiter)
+		p.Metadata.LinkingTo = splitAndTrim(value)
 	case "NeedsCompilation":
 		p.Metadata.NeedsCompilation = value == "yes"
 	}
@@ -235,8 +236,13 @@ func setField(p *Package, data string) error {
 	return nil
 }
 
-func splitAndTrim(s, sep string) []string {
-	items := strings.Split(s, sep)
+// CompareVersions returns -1, 0 or 1, R treats "." and "-" as equivalent separators
+func CompareVersions(a, b string) int {
+	return cmp.Compare(base.NaturalSortCompare(strings.ReplaceAll(a, "-", "."), strings.ReplaceAll(b, "-", ".")), 0)
+}
+
+func splitAndTrim(s string) []string {
+	items := strings.Split(s, ", ")
 	for i := range items {
 		items[i] = strings.TrimSpace(items[i])
 	}

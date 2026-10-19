@@ -6,16 +6,17 @@ package admin
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models/webhook"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/webhook"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/templates"
+	"gitea.dev/services/audit"
+	"gitea.dev/services/context"
 )
 
 const (
 	// tplAdminHooks template path to render hook settings
-	tplAdminHooks base.TplName = "admin/hooks"
+	tplAdminHooks templates.TplName = "admin/hooks"
 )
 
 // DefaultOrSystemWebhooks renders both admin default and system webhook list pages
@@ -34,20 +35,20 @@ func DefaultOrSystemWebhooks(ctx *context.Context) {
 	}
 
 	sys["Title"] = ctx.Tr("admin.systemhooks")
-	sys["Description"] = ctx.Tr("admin.systemhooks.desc")
-	sys["Webhooks"], err = webhook.GetSystemWebhooks(ctx, util.OptionalBoolNone)
-	sys["BaseLink"] = setting.AppSubURL + "/admin/hooks"
-	sys["BaseLinkNew"] = setting.AppSubURL + "/admin/system-hooks"
+	sys["Description"] = ctx.Tr("admin.systemhooks.desc", "https://docs.gitea.com/usage/webhooks")
+	sys["Webhooks"], err = webhook.GetSystemWebhooks(ctx, optional.None[bool]())
+	sys["BaseLink"] = setting.AppSubURL + "/-/admin/hooks"
+	sys["BaseLinkNew"] = setting.AppSubURL + "/-/admin/system-hooks"
 	if err != nil {
 		ctx.ServerError("GetWebhooksAdmin", err)
 		return
 	}
 
 	def["Title"] = ctx.Tr("admin.defaulthooks")
-	def["Description"] = ctx.Tr("admin.defaulthooks.desc")
+	def["Description"] = ctx.Tr("admin.defaulthooks.desc", "https://docs.gitea.com/usage/webhooks")
 	def["Webhooks"], err = webhook.GetDefaultWebhooks(ctx)
-	def["BaseLink"] = setting.AppSubURL + "/admin/hooks"
-	def["BaseLinkNew"] = setting.AppSubURL + "/admin/default-hooks"
+	def["BaseLink"] = setting.AppSubURL + "/-/admin/hooks"
+	def["BaseLinkNew"] = setting.AppSubURL + "/-/admin/default-hooks"
 	if err != nil {
 		ctx.ServerError("GetWebhooksAdmin", err)
 		return
@@ -61,11 +62,16 @@ func DefaultOrSystemWebhooks(ctx *context.Context) {
 
 // DeleteDefaultOrSystemWebhook handler to delete an admin-defined system or default webhook
 func DeleteDefaultOrSystemWebhook(ctx *context.Context) {
-	if err := webhook.DeleteDefaultSystemWebhook(ctx, ctx.FormInt64("id")); err != nil {
+	hook, err := webhook.GetWebhookByID(ctx, ctx.FormInt64("id"))
+	if err != nil {
+		ctx.Flash.Error("GetWebhookByID: " + err.Error())
+	} else if err := webhook.DeleteDefaultSystemWebhook(ctx, hook.ID); err != nil {
 		ctx.Flash.Error("DeleteDefaultWebhook: " + err.Error())
 	} else {
+		audit.RecordScoped(ctx, nil, nil, audit.WebhookRemove, "webhook", hook.URL)
+
 		ctx.Flash.Success(ctx.Tr("repo.settings.webhook_deletion_success"))
 	}
 
-	ctx.JSONRedirect(setting.AppSubURL + "/admin/hooks")
+	ctx.JSONRedirect(setting.AppSubURL + "/-/admin/hooks")
 }

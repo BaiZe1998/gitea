@@ -7,11 +7,11 @@ import (
 	"context"
 	"fmt"
 
-	"code.gitea.io/gitea/models/avatars"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/avatars"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/timeutil"
+	"gitea.dev/modules/util"
 
 	"xorm.io/builder"
 )
@@ -161,20 +161,20 @@ func FetchIssueContentHistoryList(dbCtx context.Context, issueID, commentID int6
 	}
 
 	for _, item := range res {
-		item.UserAvatarLink = avatars.GenerateUserAvatarFastLink(item.UserName, 0)
+		if item.UserID > 0 {
+			item.UserAvatarLink = avatars.GenerateUserAvatarFastLink(item.UserName, 0)
+		} else {
+			item.UserAvatarLink = avatars.DefaultAvatarLink()
+		}
 	}
 	return res, nil
 }
 
 // HasIssueContentHistory check if a ContentHistory entry exists
 func HasIssueContentHistory(dbCtx context.Context, issueID, commentID int64) (bool, error) {
-	exists, err := db.GetEngine(dbCtx).Cols("id").Exist(&ContentHistory{
-		IssueID:   issueID,
-		CommentID: commentID,
-	})
+	exists, err := db.GetEngine(dbCtx).Where(builder.Eq{"issue_id": issueID, "comment_id": commentID}).Exist(&ContentHistory{})
 	if err != nil {
-		log.Error("can not fetch issue content history. err=%v", err)
-		return false, err
+		return false, fmt.Errorf("can not check issue content history. err: %w", err)
 	}
 	return exists, err
 }

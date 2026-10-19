@@ -8,22 +8,19 @@ import (
 	"net/http"
 	"strings"
 
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/context"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/session"
 )
 
 // UserAssignmentWeb returns a middleware to handle context-user assignment for web routes
-func UserAssignmentWeb() func(ctx *context.Context) {
-	return func(ctx *context.Context) {
-		errorFn := func(status int, title string, obj any) {
-			err, ok := obj.(error)
-			if !ok {
-				err = fmt.Errorf("%s", obj)
-			}
+func UserAssignmentWeb() func(ctx *Context) {
+	return func(ctx *Context) {
+		errorFn := func(status int, msg string) {
+			err := fmt.Errorf("%s", msg)
 			if status == http.StatusNotFound {
-				ctx.NotFound(title, err)
+				ctx.NotFound(err)
 			} else {
-				ctx.ServerError(title, err)
+				ctx.ServerError("UserAssignmentWeb", err)
 			}
 		}
 		ctx.ContextUser = userAssignment(ctx.Base, ctx.Doer, errorFn)
@@ -31,38 +28,17 @@ func UserAssignmentWeb() func(ctx *context.Context) {
 	}
 }
 
-// UserIDAssignmentAPI returns a middleware to handle context-user assignment for api routes
-func UserIDAssignmentAPI() func(ctx *context.APIContext) {
-	return func(ctx *context.APIContext) {
-		userID := ctx.ParamsInt64(":user-id")
-
-		if ctx.IsSigned && ctx.Doer.ID == userID {
-			ctx.ContextUser = ctx.Doer
-		} else {
-			var err error
-			ctx.ContextUser, err = user_model.GetUserByID(ctx, userID)
-			if err != nil {
-				if user_model.IsErrUserNotExist(err) {
-					ctx.Error(http.StatusNotFound, "GetUserByID", err)
-				} else {
-					ctx.Error(http.StatusInternalServerError, "GetUserByID", err)
-				}
-			}
-		}
-	}
-}
-
 // UserAssignmentAPI returns a middleware to handle context-user assignment for api routes
-func UserAssignmentAPI() func(ctx *context.APIContext) {
-	return func(ctx *context.APIContext) {
-		ctx.ContextUser = userAssignment(ctx.Base, ctx.Doer, ctx.Error)
+func UserAssignmentAPI() func(ctx *APIContext) {
+	return func(ctx *APIContext) {
+		ctx.ContextUser = userAssignment(ctx.Base, ctx.Doer, ctx.APIError)
 	}
 }
 
-func userAssignment(ctx *context.Base, doer *user_model.User, errCb func(int, string, any)) (contextUser *user_model.User) {
-	username := ctx.Params(":username")
+func userAssignment(ctx *Base, doer *user_model.User, errCb func(int, string)) (contextUser *user_model.User) {
+	username := ctx.PathParam("username")
 
-	if doer != nil && doer.LowerName == strings.ToLower(username) {
+	if doer != nil && strings.EqualFold(doer.LowerName, username) {
 		contextUser = doer
 	} else {
 		var err error
@@ -70,16 +46,25 @@ func userAssignment(ctx *context.Base, doer *user_model.User, errCb func(int, st
 		if err != nil {
 			if user_model.IsErrUserNotExist(err) {
 				if redirectUserID, err := user_model.LookupUserRedirect(ctx, username); err == nil {
-					context.RedirectToUser(ctx, username, redirectUserID)
+					RedirectToUser(ctx, doer, username, redirectUserID)
 				} else if user_model.IsErrUserRedirectNotExist(err) {
-					errCb(http.StatusNotFound, "GetUserByName", err)
+					errCb(http.StatusNotFound, err.Error())
 				} else {
-					errCb(http.StatusInternalServerError, "LookupUserRedirect", err)
+					errCb(http.StatusInternalServerError, fmt.Sprintf("LookupUserRedirect: %v", err))
 				}
 			} else {
-				errCb(http.StatusInternalServerError, "GetUserByName", err)
+				errCb(http.StatusInternalServerError, fmt.Sprintf("GetUserByName: %v", err))
 			}
+			return nil
 		}
 	}
+	if !user_model.DoerTokenAllowsOwner(doer, contextUser) {
+		errCb(http.StatusNotFound, user_model.ErrUserRedirectNotExist{Name: username}.Error())
+		return nil
+	}
 	return contextUser
+}
+
+func IsDoerSessionImpersonated(sess session.Store) bool {
+	return sess.Get(session.KeyImpersonatorData) != nil
 }

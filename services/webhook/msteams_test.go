@@ -4,471 +4,477 @@
 package webhook
 
 import (
+	"fmt"
 	"testing"
 
-	api "code.gitea.io/gitea/modules/structs"
-	webhook_module "code.gitea.io/gitea/modules/webhook"
+	webhook_model "gitea.dev/models/webhook"
+	"gitea.dev/modules/json"
+	api "gitea.dev/modules/structs"
+	webhook_module "gitea.dev/modules/webhook"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestMSTeamsPayload(t *testing.T) {
+	mc := msteamsConvertor{}
 	t.Run("Create", func(t *testing.T) {
 		p := createTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Create(p)
+		pl, err := mc.Create(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] branch test created", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] branch test created", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] branch test created", pl.Title)
+		assert.Equal(t, "[test/repo] branch test created", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repo.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repo.FullName, p.Repo.HTMLURL), fact.Value)
 			} else if fact.Name == "branch:" {
 				assert.Equal(t, "test", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/src/test", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/src/test", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Delete", func(t *testing.T) {
 		p := deleteTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Delete(p)
+		pl, err := mc.Delete(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] branch test deleted", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] branch test deleted", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] branch test deleted", pl.Title)
+		assert.Equal(t, "[test/repo] branch test deleted", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repo.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repo.FullName, p.Repo.HTMLURL), fact.Value)
 			} else if fact.Name == "branch:" {
 				assert.Equal(t, "test", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/src/test", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/src/test", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Fork", func(t *testing.T) {
 		p := forkTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Fork(p)
+		pl, err := mc.Fork(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "test/repo2 is forked to test/repo", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "test/repo2 is forked to test/repo", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "test/repo2 is forked to test/repo", pl.Title)
+		assert.Equal(t, "test/repo2 is forked to test/repo", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repo.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repo.FullName, p.Repo.HTMLURL), fact.Value)
 			} else if fact.Name == "Forkee:" {
 				assert.Equal(t, p.Forkee.FullName, fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Push", func(t *testing.T) {
 		p := pushTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Push(p)
+		pl, err := mc.Push(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo:test] 2 new commits", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo:test] 2 new commits", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "[2020558](http://localhost:3000/test/repo/commit/2020558fe2e34debb818a514715839cabd25e778) commit message - user1\n\n[2020558](http://localhost:3000/test/repo/commit/2020558fe2e34debb818a514715839cabd25e778) commit message - user1", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo:test] 2 new commits", pl.Title)
+		assert.Equal(t, "[test/repo:test] 2 new commits", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Equal(t, "[2020558](http://localhost:3000/test/repo/commit/2020558fe2e34debb818a514715839cabd25e778) commit message - user1\n\n[2020558](http://localhost:3000/test/repo/commit/2020558fe2e34debb818a514715839cabd25e778) commit message - user1", pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repo.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repo.FullName, p.Repo.HTMLURL), fact.Value)
 			} else if fact.Name == "Commit count:" {
 				assert.Equal(t, "2", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/src/test", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/src/test", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Issue", func(t *testing.T) {
 		p := issueTestPayload()
 
-		d := new(MSTeamsPayload)
 		p.Action = api.HookIssueOpened
-		pl, err := d.Issue(p)
+		pl, err := mc.Issue(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Issue opened: #2 crash", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Issue opened: #2 crash", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "issue body", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Issue opened: #2 crash", pl.Title)
+		assert.Equal(t, "[test/repo] Issue opened: #2 crash", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Equal(t, "issue body", pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else if fact.Name == "Issue #:" {
 				assert.Equal(t, "2", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/issues/2", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/issues/2", pl.PotentialAction[0].Targets[0].URI)
 
 		p.Action = api.HookIssueClosed
-		pl, err = d.Issue(p)
+		pl, err = mc.Issue(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Issue closed: #2 crash", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Issue closed: #2 crash", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Issue closed: #2 crash", pl.Title)
+		assert.Equal(t, "[test/repo] Issue closed: #2 crash", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else if fact.Name == "Issue #:" {
 				assert.Equal(t, "2", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/issues/2", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/issues/2", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("IssueComment", func(t *testing.T) {
 		p := issueCommentTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.IssueComment(p)
+		pl, err := mc.IssueComment(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] New comment on issue #2 crash", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] New comment on issue #2 crash", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "more info needed", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] New comment on issue #2 crash", pl.Title)
+		assert.Equal(t, "[test/repo] New comment on issue #2 crash", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Equal(t, "more info needed", pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else if fact.Name == "Issue #:" {
 				assert.Equal(t, "2", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/issues/2#issuecomment-4", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/issues/2#issuecomment-4", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("PullRequest", func(t *testing.T) {
 		p := pullRequestTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.PullRequest(p)
+		pl, err := mc.PullRequest(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Pull request opened: #12 Fix bug", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Pull request opened: #12 Fix bug", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "fixes bug #2", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Pull request opened: #12 Fix bug", pl.Title)
+		assert.Equal(t, "[test/repo] Pull request opened: #12 Fix bug", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Equal(t, "fixes bug #2", pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
-			} else if fact.Name == "Pull request #:" {
-				assert.Equal(t, "12", fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
+			} else if fact.Name == "Pull request:" {
+				assert.Equal(t, fmt.Sprintf("[#%d](%s)", p.PullRequest.Index, p.PullRequest.HTMLURL), fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/pulls/12", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/pulls/12", pl.PotentialAction[0].Targets[0].URI)
+	})
+
+	t.Run("PullRequestReviewRequest", func(t *testing.T) {
+		p := pullRequestTestPayload()
+		p.Action = api.HookIssueReviewRequested
+		p.RequestedReviewer = &api.User{
+			UserName: "reviewer1",
+			FullName: "Reviewer One",
+		}
+
+		pl, err := mc.PullRequest(p)
+		require.NoError(t, err)
+
+		assert.Len(t, pl.Sections[0].Facts, 3)
+		var hasReviewer bool
+		for _, fact := range pl.Sections[0].Facts {
+			if fact.Name == "Repository:" {
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
+			} else if fact.Name == "Pull request:" {
+				assert.Equal(t, fmt.Sprintf("[#%d](%s)", p.PullRequest.Index, p.PullRequest.HTMLURL), fact.Value)
+			} else if fact.Name == "Requested Reviewer:" {
+				assert.Equal(t, "reviewer1 (Reviewer One)", fact.Value)
+				hasReviewer = true
+			} else {
+				t.Fail()
+			}
+		}
+		assert.True(t, hasReviewer)
 	})
 
 	t.Run("PullRequestComment", func(t *testing.T) {
 		p := pullRequestCommentTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.IssueComment(p)
+		pl, err := mc.IssueComment(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] New comment on pull request #12 Fix bug", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] New comment on pull request #12 Fix bug", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "changes requested", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] New comment on pull request #12 Fix bug", pl.Title)
+		assert.Equal(t, "[test/repo] New comment on pull request #12 Fix bug", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Equal(t, "changes requested", pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else if fact.Name == "Issue #:" {
 				assert.Equal(t, "12", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/pulls/12#issuecomment-4", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/pulls/12#issuecomment-4", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Review", func(t *testing.T) {
 		p := pullRequestTestPayload()
 		p.Action = api.HookIssueReviewed
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Review(p, webhook_module.HookEventPullRequestReviewApproved)
+		pl, err := mc.Review(p, webhook_module.HookEventPullRequestReviewApproved)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Pull request review approved: #12 Fix bug", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Pull request review approved: #12 Fix bug", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "good job", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Pull request review approved: #12 Fix bug", pl.Title)
+		assert.Equal(t, "[test/repo] Pull request review approved: #12 Fix bug", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Equal(t, "good job", pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
-			} else if fact.Name == "Pull request #:" {
-				assert.Equal(t, "12", fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
+			} else if fact.Name == "Pull request:" {
+				assert.Equal(t, fmt.Sprintf("[#%d](%s)", p.PullRequest.Index, p.PullRequest.HTMLURL), fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/pulls/12", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/pulls/12", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Repository", func(t *testing.T) {
 		p := repositoryTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Repository(p)
+		pl, err := mc.Repository(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Repository created", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Repository created", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 1)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Repository created", pl.Title)
+		assert.Equal(t, "[test/repo] Repository created", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 1)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Package", func(t *testing.T) {
 		p := packageTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Package(p)
+		pl, err := mc.Package(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "Package created: GiteaContainer:latest", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "Package created: GiteaContainer:latest", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 1)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "Package created: GiteaContainer:latest", pl.Title)
+		assert.Equal(t, "Package created: GiteaContainer:latest", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 1)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Package:" {
 				assert.Equal(t, p.Package.Name, fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/user1/-/packages/container/GiteaContainer/latest", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/user1/-/packages/container/GiteaContainer/latest", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Wiki", func(t *testing.T) {
 		p := wikiTestPayload()
 
-		d := new(MSTeamsPayload)
 		p.Action = api.HookWikiCreated
-		pl, err := d.Wiki(p)
+		pl, err := mc.Wiki(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] New wiki page 'index' (Wiki change comment)", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] New wiki page 'index' (Wiki change comment)", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] New wiki page 'index' (Wiki change comment)", pl.Title)
+		assert.Equal(t, "[test/repo] New wiki page 'index' (Wiki change comment)", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 1)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/wiki/index", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
 
 		p.Action = api.HookWikiEdited
-		pl, err = d.Wiki(p)
+		pl, err = mc.Wiki(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Wiki page 'index' edited (Wiki change comment)", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Wiki page 'index' edited (Wiki change comment)", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Equal(t, "", pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Wiki page 'index' edited (Wiki change comment)", pl.Title)
+		assert.Equal(t, "[test/repo] Wiki page 'index' edited (Wiki change comment)", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 1)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/wiki/index", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/wiki/index", pl.PotentialAction[0].Targets[0].URI)
 
 		p.Action = api.HookWikiDeleted
-		pl, err = d.Wiki(p)
+		pl, err = mc.Wiki(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Wiki page 'index' deleted", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Wiki page 'index' deleted", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Wiki page 'index' deleted", pl.Title)
+		assert.Equal(t, "[test/repo] Wiki page 'index' deleted", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 1)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/wiki/index", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/wiki/index", pl.PotentialAction[0].Targets[0].URI)
 	})
 
 	t.Run("Release", func(t *testing.T) {
 		p := pullReleaseTestPayload()
 
-		d := new(MSTeamsPayload)
-		pl, err := d.Release(p)
+		pl, err := mc.Release(p)
 		require.NoError(t, err)
-		require.NotNil(t, pl)
-		require.IsType(t, &MSTeamsPayload{}, pl)
 
-		assert.Equal(t, "[test/repo] Release created: v1.0", pl.(*MSTeamsPayload).Title)
-		assert.Equal(t, "[test/repo] Release created: v1.0", pl.(*MSTeamsPayload).Summary)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections, 1)
-		assert.Equal(t, "user1", pl.(*MSTeamsPayload).Sections[0].ActivitySubtitle)
-		assert.Empty(t, pl.(*MSTeamsPayload).Sections[0].Text)
-		assert.Len(t, pl.(*MSTeamsPayload).Sections[0].Facts, 2)
-		for _, fact := range pl.(*MSTeamsPayload).Sections[0].Facts {
+		assert.Equal(t, "[test/repo] Release created: v1.0", pl.Title)
+		assert.Equal(t, "[test/repo] Release created: v1.0", pl.Summary)
+		assert.Len(t, pl.Sections, 1)
+		assert.Equal(t, "user1", pl.Sections[0].ActivitySubtitle)
+		assert.Empty(t, pl.Sections[0].Text)
+		assert.Len(t, pl.Sections[0].Facts, 2)
+		for _, fact := range pl.Sections[0].Facts {
 			if fact.Name == "Repository:" {
-				assert.Equal(t, p.Repository.FullName, fact.Value)
+				assert.Equal(t, fmt.Sprintf("[%s](%s)", p.Repository.FullName, p.Repository.HTMLURL), fact.Value)
 			} else if fact.Name == "Tag:" {
 				assert.Equal(t, "v1.0", fact.Value)
 			} else {
 				t.Fail()
 			}
 		}
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction, 1)
-		assert.Len(t, pl.(*MSTeamsPayload).PotentialAction[0].Targets, 1)
-		assert.Equal(t, "http://localhost:3000/test/repo/releases/tag/v1.0", pl.(*MSTeamsPayload).PotentialAction[0].Targets[0].URI)
+		assert.Len(t, pl.PotentialAction, 1)
+		assert.Len(t, pl.PotentialAction[0].Targets, 1)
+		assert.Equal(t, "http://localhost:3000/test/repo/releases/tag/v1.0", pl.PotentialAction[0].Targets[0].URI)
 	})
 }
 
 func TestMSTeamsJSONPayload(t *testing.T) {
 	p := pushTestPayload()
-
-	pl, err := new(MSTeamsPayload).Push(p)
+	data, err := p.JSONPayload()
 	require.NoError(t, err)
-	require.NotNil(t, pl)
-	require.IsType(t, &MSTeamsPayload{}, pl)
 
-	json, err := pl.JSONPayload()
+	hook := &webhook_model.Webhook{
+		RepoID:     3,
+		IsActive:   true,
+		Type:       webhook_module.MSTEAMS,
+		URL:        "https://msteams.example.com/",
+		Meta:       ``,
+		HTTPMethod: "POST",
+	}
+	task := &webhook_model.HookTask{
+		HookID:         hook.ID,
+		EventType:      webhook_module.HookEventPush,
+		PayloadContent: string(data),
+		PayloadVersion: 2,
+	}
+
+	req, reqBody, err := newMSTeamsRequest(t.Context(), hook, task)
+	require.NotNil(t, req)
+	require.NotNil(t, reqBody)
 	require.NoError(t, err)
-	assert.NotEmpty(t, json)
+
+	assert.Equal(t, "POST", req.Method)
+	assert.Equal(t, "https://msteams.example.com/", req.URL.String())
+	assert.Equal(t, "sha256=", req.Header.Get("X-Hub-Signature-256"))
+	assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
+	var body MSTeamsPayload
+	err = json.NewDecoder(req.Body).Decode(&body)
+	assert.NoError(t, err)
+	assert.Equal(t, "[test/repo:test] 2 new commits", body.Summary)
 }

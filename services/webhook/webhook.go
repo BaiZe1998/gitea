@@ -7,66 +7,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"net/http"
 
-	"code.gitea.io/gitea/models/db"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	webhook_model "code.gitea.io/gitea/models/webhook"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/graceful"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/queue"
-	"code.gitea.io/gitea/modules/setting"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/util"
-	webhook_module "code.gitea.io/gitea/modules/webhook"
-
-	"github.com/gobwas/glob"
+	"gitea.dev/models/db"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	webhook_model "gitea.dev/models/webhook"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/glob"
+	"gitea.dev/modules/graceful"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/queue"
+	"gitea.dev/modules/setting"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	webhook_module "gitea.dev/modules/webhook"
 )
 
-type webhook struct {
-	name           webhook_module.HookType
-	payloadCreator func(p api.Payloader, event webhook_module.HookEventType, meta string) (api.Payloader, error)
-}
+type Requester func(context.Context, *webhook_model.Webhook, *webhook_model.HookTask) (req *http.Request, body []byte, err error)
 
-var webhooks = map[webhook_module.HookType]*webhook{
-	webhook_module.SLACK: {
-		name:           webhook_module.SLACK,
-		payloadCreator: GetSlackPayload,
-	},
-	webhook_module.DISCORD: {
-		name:           webhook_module.DISCORD,
-		payloadCreator: GetDiscordPayload,
-	},
-	webhook_module.DINGTALK: {
-		name:           webhook_module.DINGTALK,
-		payloadCreator: GetDingtalkPayload,
-	},
-	webhook_module.TELEGRAM: {
-		name:           webhook_module.TELEGRAM,
-		payloadCreator: GetTelegramPayload,
-	},
-	webhook_module.MSTEAMS: {
-		name:           webhook_module.MSTEAMS,
-		payloadCreator: GetMSTeamsPayload,
-	},
-	webhook_module.FEISHU: {
-		name:           webhook_module.FEISHU,
-		payloadCreator: GetFeishuPayload,
-	},
-	webhook_module.MATRIX: {
-		name:           webhook_module.MATRIX,
-		payloadCreator: GetMatrixPayload,
-	},
-	webhook_module.WECHATWORK: {
-		name:           webhook_module.WECHATWORK,
-		payloadCreator: GetWechatworkPayload,
-	},
-	webhook_module.PACKAGIST: {
-		name:           webhook_module.PACKAGIST,
-		payloadCreator: GetPackagistPayload,
-	},
+var webhookRequesters = map[webhook_module.HookType]Requester{}
+
+func RegisterWebhookRequester(hookType webhook_module.HookType, requester Requester) {
+	webhookRequesters[hookType] = requester
 }
 
 // IsValidHookTaskType returns true if a webhook registered
@@ -74,28 +38,32 @@ func IsValidHookTaskType(name string) bool {
 	if name == webhook_module.GITEA || name == webhook_module.GOGS {
 		return true
 	}
-	_, ok := webhooks[name]
+	_, ok := webhookRequesters[name]
 	return ok
 }
 
 // hookQueue is a global queue of web hooks
 var hookQueue *queue.WorkerPoolQueue[int64]
 
-// getPayloadBranch returns branch for hook event, if applicable.
-func getPayloadBranch(p api.Payloader) string {
+// getPayloadRef returns the full ref name for hook event, if applicable.
+func getPayloadRef(p api.Payloader) git.RefName {
 	switch pp := p.(type) {
 	case *api.CreatePayload:
-		if pp.RefType == "branch" {
-			return pp.Ref
+		switch pp.RefType {
+		case "branch":
+			return git.RefNameFromBranch(pp.Ref)
+		case "tag":
+			return git.RefNameFromTag(pp.Ref)
 		}
 	case *api.DeletePayload:
-		if pp.RefType == "branch" {
-			return pp.Ref
+		switch pp.RefType {
+		case "branch":
+			return git.RefNameFromBranch(pp.Ref)
+		case "tag":
+			return git.RefNameFromTag(pp.Ref)
 		}
 	case *api.PushPayload:
-		if strings.HasPrefix(pp.Ref, git.BranchPrefix) {
-			return pp.Ref[len(git.BranchPrefix):]
-		}
+		return git.RefName(pp.Ref)
 	}
 	return ""
 }
@@ -143,36 +111,62 @@ func enqueueHookTask(taskID int64) error {
 	return nil
 }
 
-func checkBranch(w *webhook_model.Webhook, branch string) bool {
-	if w.BranchFilter == "" || w.BranchFilter == "*" {
+func checkBranchFilter(branchFilter string, ref git.RefName) bool {
+	if branchFilter == "" || branchFilter == "*" || branchFilter == "**" {
 		return true
 	}
 
-	g, err := glob.Compile(w.BranchFilter)
+	g, err := glob.Compile(branchFilter)
 	if err != nil {
 		// should not really happen as BranchFilter is validated
-		log.Error("CheckBranch failed: %s", err)
+		log.Debug("checkBranchFilter failed to compile filer %q, err: %s", branchFilter, err)
 		return false
 	}
 
-	return g.Match(branch)
+	if ref.IsBranch() && g.Match(ref.BranchName()) {
+		return true
+	}
+	return g.Match(ref.String())
 }
 
-// PrepareWebhook creates a hook task and enqueues it for processing
+// PrepareTestWebhook always creates and enqueues a hook task for manual testing.
+// Unlike PrepareWebhook, it ignores event subscriptions and branch filters so the
+// Test Push Event control can verify delivery even when those gates would suppress
+// a real event.
+func PrepareTestWebhook(ctx context.Context, w *webhook_model.Webhook, event webhook_module.HookEventType, p api.Payloader) error {
+	if setting.DisableWebhooks {
+		return nil
+	}
+
+	payload, err := p.JSONPayload()
+	if err != nil {
+		return fmt.Errorf("JSONPayload for %s: %w", event, err)
+	}
+
+	task, err := webhook_model.CreateHookTask(ctx, &webhook_model.HookTask{
+		HookID:         w.ID,
+		PayloadContent: string(payload),
+		EventType:      event,
+		PayloadVersion: 2,
+	})
+	if err != nil {
+		return fmt.Errorf("CreateHookTask for %s: %w", event, err)
+	}
+
+	return enqueueHookTask(task.ID)
+}
+
+// PrepareWebhook creates a hook task and enqueues it for processing.
+// The payload is saved as-is. The adjustments depending on the webhook type happen
+// right before delivery, in the [Deliver] method.
 func PrepareWebhook(ctx context.Context, w *webhook_model.Webhook, event webhook_module.HookEventType, p api.Payloader) error {
 	// Skip sending if webhooks are disabled.
 	if setting.DisableWebhooks {
 		return nil
 	}
 
-	for _, e := range w.EventCheckers() {
-		if event == e.Type {
-			if !e.Has() {
-				return nil
-			}
-
-			break
-		}
+	if !w.HasEvent(event) {
+		return nil
 	}
 
 	// Avoid sending "0 new commits" to non-integration relevant webhooks (e.g. slack, discord, etc.).
@@ -183,34 +177,27 @@ func PrepareWebhook(ctx context.Context, w *webhook_model.Webhook, event webhook
 		return nil
 	}
 
-	// If payload has no associated branch (e.g. it's a new tag, issue, etc.),
-	// branch filter has no effect.
-	if branch := getPayloadBranch(p); branch != "" {
-		if !checkBranch(w, branch) {
-			log.Info("Branch %q doesn't match branch filter %q, skipping", branch, w.BranchFilter)
+	// If payload has no associated branch (e.g. it's a new tag, issue, etc.), branch filter has no effect.
+	if ref := getPayloadRef(p); ref != "" {
+		// Check the payload's git ref against the webhook's branch filter.
+		if !checkBranchFilter(w.BranchFilter, ref) {
 			return nil
 		}
 	}
 
-	var payloader api.Payloader
-	var err error
-	webhook, ok := webhooks[w.Type]
-	if ok {
-		payloader, err = webhook.payloadCreator(p, event, w.Meta)
-		if err != nil {
-			return fmt.Errorf("create payload for %s[%s]: %w", w.Type, event, err)
-		}
-	} else {
-		payloader = p
+	payload, err := p.JSONPayload()
+	if err != nil {
+		return fmt.Errorf("JSONPayload for %s: %w", event, err)
 	}
 
 	task, err := webhook_model.CreateHookTask(ctx, &webhook_model.HookTask{
-		HookID:    w.ID,
-		Payloader: payloader,
-		EventType: event,
+		HookID:         w.ID,
+		PayloadContent: string(payload),
+		EventType:      event,
+		PayloadVersion: 2,
 	})
 	if err != nil {
-		return fmt.Errorf("CreateHookTask: %w", err)
+		return fmt.Errorf("CreateHookTask for %s: %w", event, err)
 	}
 
 	return enqueueHookTask(task.ID)
@@ -225,7 +212,7 @@ func PrepareWebhooks(ctx context.Context, source EventSource, event webhook_modu
 	if source.Repository != nil {
 		repoHooks, err := db.Find[webhook_model.Webhook](ctx, webhook_model.ListWebhookOptions{
 			RepoID:   source.Repository.ID,
-			IsActive: util.OptionalBoolTrue,
+			IsActive: optional.Some(true),
 		})
 		if err != nil {
 			return fmt.Errorf("ListWebhooksByOpts: %w", err)
@@ -239,7 +226,7 @@ func PrepareWebhooks(ctx context.Context, source EventSource, event webhook_modu
 	if owner != nil {
 		ownerHooks, err := db.Find[webhook_model.Webhook](ctx, webhook_model.ListWebhookOptions{
 			OwnerID:  owner.ID,
-			IsActive: util.OptionalBoolTrue,
+			IsActive: optional.Some(true),
 		})
 		if err != nil {
 			return fmt.Errorf("ListWebhooksByOpts: %w", err)
@@ -248,7 +235,7 @@ func PrepareWebhooks(ctx context.Context, source EventSource, event webhook_modu
 	}
 
 	// Add any admin-defined system webhooks
-	systemHooks, err := webhook_model.GetSystemWebhooks(ctx, util.OptionalBoolTrue)
+	systemHooks, err := webhook_model.GetSystemWebhooks(ctx, optional.Some(true))
 	if err != nil {
 		return fmt.Errorf("GetSystemWebhooks: %w", err)
 	}

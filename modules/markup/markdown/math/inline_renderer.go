@@ -6,24 +6,31 @@ package math
 import (
 	"bytes"
 
+	"gitea.dev/modules/markup/internal"
+
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/util"
 )
 
+// Inline render output:
+// <code class="language-math">...</code>
+
 // InlineRenderer is an inline renderer
-type InlineRenderer struct{}
+type InlineRenderer struct {
+	renderInternal *internal.RenderInternal
+}
 
 // NewInlineRenderer returns a new renderer for inline math
-func NewInlineRenderer() renderer.NodeRenderer {
-	return &InlineRenderer{}
+func NewInlineRenderer(renderInternal *internal.RenderInternal) renderer.NodeRenderer {
+	return &InlineRenderer{renderInternal: renderInternal}
 }
 
 func (r *InlineRenderer) renderInline(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		_, _ = w.WriteString(`<code class="language-math is-loading">`)
+		_, _ = w.WriteString(string(r.renderInternal.ProtectSafeAttrs(`<code class="language-math">`)))
 		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
-			segment := c.(*ast.Text).Segment
+			segment := c.(*ast.Text).Segment //nolint:forcetypeassert // an inline math node only holds text children
 			value := util.EscapeHTML(segment.Value(source))
 			if bytes.HasSuffix(value, []byte("\n")) {
 				_, _ = w.Write(value[:len(value)-1])

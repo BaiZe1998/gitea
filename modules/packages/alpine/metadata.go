@@ -13,14 +13,15 @@ import (
 	"strconv"
 	"strings"
 
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/modules/validation"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/validation"
 )
 
 var (
-	ErrMissingPKGINFOFile = util.NewInvalidArgumentErrorf("PKGINFO file is missing")
-	ErrInvalidName        = util.NewInvalidArgumentErrorf("package name is invalid")
-	ErrInvalidVersion     = util.NewInvalidArgumentErrorf("package version is invalid")
+	ErrMissingPKGINFOFile  = util.NewInvalidArgumentErrorf("PKGINFO file is missing")
+	ErrInvalidName         = util.NewInvalidArgumentErrorf("package name is invalid")
+	ErrInvalidVersion      = util.NewInvalidArgumentErrorf("package version is invalid")
+	ErrPackageInfoTooLarge = util.NewInvalidArgumentErrorf("PKGINFO contains too many entries")
 )
 
 const (
@@ -34,6 +35,10 @@ const (
 
 	RepositoryPackage = "_alpine"
 	RepositoryVersion = "_repository"
+
+	NoArch = "noarch"
+
+	maxPackageInfoEntries = 1024
 )
 
 // https://wiki.alpinelinux.org/wiki/Apk_spec
@@ -55,16 +60,17 @@ type VersionMetadata struct {
 }
 
 type FileMetadata struct {
-	Checksum     string   `json:"checksum"`
-	Packager     string   `json:"packager,omitempty"`
-	BuildDate    int64    `json:"build_date,omitempty"`
-	Size         int64    `json:"size,omitempty"`
-	Architecture string   `json:"architecture,omitempty"`
-	Origin       string   `json:"origin,omitempty"`
-	CommitHash   string   `json:"commit_hash,omitempty"`
-	InstallIf    string   `json:"install_if,omitempty"`
-	Provides     []string `json:"provides,omitempty"`
-	Dependencies []string `json:"dependencies,omitempty"`
+	Checksum         string   `json:"checksum"`
+	Packager         string   `json:"packager,omitempty"`
+	BuildDate        int64    `json:"build_date,omitempty"`
+	Size             int64    `json:"size,omitempty"`
+	Architecture     string   `json:"architecture,omitempty"`
+	Origin           string   `json:"origin,omitempty"`
+	CommitHash       string   `json:"commit_hash,omitempty"`
+	InstallIf        string   `json:"install_if,omitempty"`
+	Provides         []string `json:"provides,omitempty"`
+	Dependencies     []string `json:"dependencies,omitempty"`
+	ProviderPriority int64    `json:"provider_priority,omitempty"`
 }
 
 // ParsePackage parses the Alpine package file
@@ -182,11 +188,22 @@ func ParsePackageInfo(r io.Reader) (*Package, error) {
 			p.FileMetadata.InstallIf = value
 		case "provides":
 			if value != "" {
+				if len(p.FileMetadata.Provides)+len(p.FileMetadata.Dependencies) >= maxPackageInfoEntries {
+					return nil, ErrPackageInfoTooLarge
+				}
 				p.FileMetadata.Provides = append(p.FileMetadata.Provides, value)
 			}
 		case "depend":
 			if value != "" {
+				if len(p.FileMetadata.Provides)+len(p.FileMetadata.Dependencies) >= maxPackageInfoEntries {
+					return nil, ErrPackageInfoTooLarge
+				}
 				p.FileMetadata.Dependencies = append(p.FileMetadata.Dependencies, value)
+			}
+		case "provider_priority":
+			n, err := strconv.ParseInt(value, 10, 64)
+			if err == nil {
+				p.FileMetadata.ProviderPriority = n
 			}
 		}
 	}

@@ -5,26 +5,24 @@ package externalaccount
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
-	"code.gitea.io/gitea/models/auth"
-	issues_model "code.gitea.io/gitea/models/issues"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/structs"
+	audit_model "gitea.dev/models/audit"
+	issues_model "gitea.dev/models/issues"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/structs"
+	"gitea.dev/services/audit"
 
 	"github.com/markbates/goth"
 )
 
-func toExternalLoginUser(ctx context.Context, user *user_model.User, gothUser goth.User) (*user_model.ExternalLoginUser, error) {
-	authSource, err := auth.GetActiveOAuth2SourceByName(ctx, gothUser.Provider)
-	if err != nil {
-		return nil, err
-	}
+func toExternalLoginUser(authSourceID int64, user *user_model.User, gothUser goth.User) *user_model.ExternalLoginUser {
 	return &user_model.ExternalLoginUser{
 		ExternalID:        gothUser.UserID,
 		UserID:            user.ID,
-		LoginSourceID:     authSource.ID,
+		LoginSourceID:     authSourceID,
 		RawData:           gothUser.RawData,
 		Provider:          gothUser.Provider,
 		Email:             gothUser.Email,
@@ -39,19 +37,19 @@ func toExternalLoginUser(ctx context.Context, user *user_model.User, gothUser go
 		AccessTokenSecret: gothUser.AccessTokenSecret,
 		RefreshToken:      gothUser.RefreshToken,
 		ExpiresAt:         gothUser.ExpiresAt,
-	}, nil
+	}
 }
 
 // LinkAccountToUser link the gothUser to the user
-func LinkAccountToUser(ctx context.Context, user *user_model.User, gothUser goth.User) error {
-	externalLoginUser, err := toExternalLoginUser(ctx, user, gothUser)
-	if err != nil {
-		return err
-	}
+func LinkAccountToUser(ctx context.Context, authSourceID int64, user *user_model.User, gothUser goth.User) error {
+	externalLoginUser := toExternalLoginUser(authSourceID, user, gothUser)
 
 	if err := user_model.LinkExternalToUser(ctx, user, externalLoginUser); err != nil {
 		return err
 	}
+
+	audit.RecordAs(ctx, user, audit_model.UserExternalLoginAdd, user,
+		"external_id", externalLoginUser.ExternalID, "provider", externalLoginUser.Provider)
 
 	externalID := externalLoginUser.ExternalID
 
@@ -70,18 +68,19 @@ func LinkAccountToUser(ctx context.Context, user *user_model.User, gothUser goth
 	return nil
 }
 
-// UpdateExternalUser updates external user's information
-func UpdateExternalUser(ctx context.Context, user *user_model.User, gothUser goth.User) error {
-	externalLoginUser, err := toExternalLoginUser(ctx, user, gothUser)
-	if err != nil {
-		return err
-	}
-
-	return user_model.UpdateExternalUserByExternalID(ctx, externalLoginUser)
+// EnsureLinkExternalToUser link the gothUser to the user
+func EnsureLinkExternalToUser(ctx context.Context, authSourceID int64, user *user_model.User, gothUser goth.User) error {
+	externalLoginUser := toExternalLoginUser(authSourceID, user, gothUser)
+	return user_model.EnsureLinkExternalToUser(ctx, externalLoginUser)
 }
 
 // UpdateMigrationsByType updates all migrated repositories' posterid from gitServiceType to replace originalAuthorID to posterID
 func UpdateMigrationsByType(ctx context.Context, tp structs.GitServiceType, externalUserID string, userID int64) error {
+	// Skip update if externalUserID is not a valid numeric ID or exceeds int64
+	if _, err := strconv.ParseInt(externalUserID, 10, 64); err != nil {
+		return nil
+	}
+
 	if err := issues_model.UpdateIssuesMigrationsByType(ctx, tp, externalUserID, userID); err != nil {
 		return err
 	}

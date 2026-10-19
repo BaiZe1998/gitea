@@ -4,17 +4,27 @@
 package template
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
-	"code.gitea.io/gitea/modules/container"
-	api "code.gitea.io/gitea/modules/structs"
-
-	"gitea.com/go-chi/binding"
+	"gitea.dev/modules/container"
+	api "gitea.dev/modules/structs"
 )
+
+var globalVars = sync.OnceValue(func() (ret struct {
+	nonAlphaDashPattern, minQuotesRegex *regexp.Regexp
+},
+) {
+	ret.nonAlphaDashPattern = regexp.MustCompile(`[^\w-]`)
+	ret.minQuotesRegex = regexp.MustCompilePOSIX("^`{3,}")
+	return ret
+})
 
 // Validate checks whether an IssueTemplate is considered valid, and returns the first error
 func Validate(template *api.IssueTemplate) error {
@@ -31,17 +41,17 @@ func Validate(template *api.IssueTemplate) error {
 
 func validateMetadata(template *api.IssueTemplate) error {
 	if strings.TrimSpace(template.Name) == "" {
-		return fmt.Errorf("'name' is required")
+		return errors.New("'name' is required")
 	}
 	if strings.TrimSpace(template.About) == "" {
-		return fmt.Errorf("'about' is required")
+		return errors.New("'about' is required")
 	}
 	return nil
 }
 
 func validateYaml(template *api.IssueTemplate) error {
 	if len(template.Fields) == 0 {
-		return fmt.Errorf("'body' is required")
+		return errors.New("'body' is required")
 	}
 	ids := make(container.Set[string])
 	for idx, field := range template.Fields {
@@ -88,7 +98,13 @@ func validateYaml(template *api.IssueTemplate) error {
 			if err := validateBoolItem(position, field.Attributes, "multiple"); err != nil {
 				return err
 			}
+			if err := validateBoolItem(position, field.Attributes, "list"); err != nil {
+				return err
+			}
 			if err := validateOptions(field, idx); err != nil {
+				return err
+			}
+			if err := validateDropdownDefault(position, field.Attributes); err != nil {
 				return err
 			}
 		case api.IssueFormFieldTypeCheckboxes:
@@ -122,7 +138,13 @@ func validateRequired(field *api.IssueFormField, idx int) error {
 		// The label is not required for a markdown or checkboxes field
 		return nil
 	}
-	return validateBoolItem(newErrorPosition(idx, field.Type), field.Validations, "required")
+	if err := validateBoolItem(newErrorPosition(idx, field.Type), field.Validations, "required"); err != nil {
+		return err
+	}
+	if required, _ := field.Validations["required"].(bool); required && !field.VisibleOnForm() {
+		return newErrorPosition(idx, field.Type).Errorf("can not require a hidden field")
+	}
+	return nil
 }
 
 func validateID(field *api.IssueFormField, idx int, ids container.Set[string]) error {
@@ -136,7 +158,7 @@ func validateID(field *api.IssueFormField, idx int, ids container.Set[string]) e
 		// If the ID is empty in yaml, template.Unmarshal will auto autofill it, so it cannot be empty
 		return position.Errorf("'id' is required")
 	}
-	if binding.AlphaDashPattern.MatchString(field.ID) {
+	if globalVars().nonAlphaDashPattern.MatchString(field.ID) {
 		return position.Errorf("'id' should contain only alphanumeric, '-' and '_'")
 	}
 	if !ids.Add(field.ID) {
@@ -153,7 +175,7 @@ func validateOptions(field *api.IssueFormField, idx int) error {
 
 	options, ok := field.Attributes["options"].([]any)
 	if !ok || len(options) == 0 {
-		return position.Errorf("'options' is required and should be a array")
+		return position.Errorf("'options' is required and should be an array")
 	}
 
 	for optIdx, option := range options {
@@ -172,9 +194,37 @@ func validateOptions(field *api.IssueFormField, idx int) error {
 				return position.Errorf("'label' is required and should be a string")
 			}
 
+			if visibility, ok := opt["visible"]; ok {
+				visibilityList, ok := visibility.([]any)
+				if !ok {
+					return position.Errorf("'visible' should be list")
+				}
+				for _, visibleType := range visibilityList {
+					visibleType, ok := visibleType.(string)
+					if !ok || !(visibleType == "form" || visibleType == "content") {
+						return position.Errorf("'visible' list can only contain strings of 'form' and 'content'")
+					}
+				}
+			}
+
 			if required, ok := opt["required"]; ok {
 				if _, ok := required.(bool); !ok {
 					return position.Errorf("'required' should be a bool")
+				}
+
+				// validate if hidden field is required
+				if visibility, ok := opt["visible"]; ok {
+					visibilityList, _ := visibility.([]any)
+					isVisible := false
+					for _, v := range visibilityList {
+						if vv, _ := v.(string); vv == "form" {
+							isVisible = true
+							break
+						}
+					}
+					if !isVisible {
+						return position.Errorf("can not require a hidden checkbox")
+					}
 				}
 			}
 		}
@@ -215,6 +265,28 @@ func validateBoolItem(position errorPosition, m map[string]any, names ...string)
 	return nil
 }
 
+func validateDropdownDefault(position errorPosition, attributes map[string]any) error {
+	v, ok := attributes["default"]
+	if !ok {
+		return nil
+	}
+	defaultValue, ok := v.(int)
+	if !ok {
+		return position.Errorf("'default' should be an int")
+	}
+
+	options, ok := attributes["options"].([]any)
+	if !ok {
+		// should not happen
+		return position.Errorf("'options' is required and should be an array")
+	}
+	if defaultValue < 0 || defaultValue >= len(options) {
+		return position.Errorf("the value of 'default' is out of range")
+	}
+
+	return nil
+}
+
 type errorPosition string
 
 func (p errorPosition) Errorf(format string, a ...any) error {
@@ -238,7 +310,7 @@ func RenderToMarkdown(template *api.IssueTemplate, values url.Values) string {
 			IssueFormField: field,
 			Values:         values,
 		}
-		if f.ID == "" {
+		if f.ID == "" || !f.VisibleInContent() {
 			continue
 		}
 		f.WriteTo(builder)
@@ -253,11 +325,6 @@ type valuedField struct {
 }
 
 func (f *valuedField) WriteTo(builder *strings.Builder) {
-	if f.Type == api.IssueFormFieldTypeMarkdown {
-		// markdown blocks do not appear in output
-		return
-	}
-
 	// write label
 	if !f.HideLabel() {
 		_, _ = fmt.Fprintf(builder, "### %s\n\n", f.Label())
@@ -269,6 +336,9 @@ func (f *valuedField) WriteTo(builder *strings.Builder) {
 	switch f.Type {
 	case api.IssueFormFieldTypeCheckboxes:
 		for _, option := range f.Options() {
+			if !option.VisibleInContent() {
+				continue
+			}
 			checked := " "
 			if option.IsChecked() {
 				checked = "x"
@@ -283,7 +353,13 @@ func (f *valuedField) WriteTo(builder *strings.Builder) {
 			}
 		}
 		if len(checkeds) > 0 {
-			_, _ = fmt.Fprintf(builder, "%s\n", strings.Join(checkeds, ", "))
+			if list, ok := f.Attributes["list"].(bool); ok && list {
+				for _, check := range checkeds {
+					_, _ = fmt.Fprintf(builder, "- %s\n", check)
+				}
+			} else {
+				_, _ = fmt.Fprintf(builder, "%s\n", strings.Join(checkeds, ", "))
+			}
 		} else {
 			_, _ = fmt.Fprint(builder, blankPlaceholder)
 		}
@@ -302,6 +378,10 @@ func (f *valuedField) WriteTo(builder *strings.Builder) {
 		} else {
 			_, _ = fmt.Fprintf(builder, "%s\n", value)
 		}
+	case api.IssueFormFieldTypeMarkdown:
+		if value, ok := f.Attributes["value"].(string); ok {
+			_, _ = fmt.Fprintf(builder, "%s\n", value)
+		}
 	}
 	_, _ = fmt.Fprintln(builder)
 }
@@ -314,6 +394,9 @@ func (f *valuedField) Label() string {
 }
 
 func (f *valuedField) HideLabel() bool {
+	if f.Type == api.IssueFormFieldTypeMarkdown {
+		return true
+	}
 	if label, ok := f.Attributes["hide_label"].(bool); ok {
 		return label
 	}
@@ -328,7 +411,7 @@ func (f *valuedField) Render() string {
 }
 
 func (f *valuedField) Value() string {
-	return strings.TrimSpace(f.Get(fmt.Sprintf("form-field-" + f.ID)))
+	return strings.TrimSpace(f.Get("form-field-" + f.ID))
 }
 
 func (f *valuedField) Options() []*valuedOption {
@@ -371,27 +454,36 @@ func (o *valuedOption) Label() string {
 func (o *valuedOption) IsChecked() bool {
 	switch o.field.Type {
 	case api.IssueFormFieldTypeDropdown:
-		checks := strings.Split(o.field.Get(fmt.Sprintf("form-field-%s", o.field.ID)), ",")
+		checks := strings.Split(o.field.Get("form-field-"+o.field.ID), ",")
 		idx := strconv.Itoa(o.index)
-		for _, v := range checks {
-			if v == idx {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(checks, idx)
 	case api.IssueFormFieldTypeCheckboxes:
 		return o.field.Get(fmt.Sprintf("form-field-%s-%d", o.field.ID, o.index)) == "on"
 	}
 	return false
 }
 
-var minQuotesRegex = regexp.MustCompilePOSIX("^`{3,}")
+func (o *valuedOption) VisibleInContent() bool {
+	if o.field.Type == api.IssueFormFieldTypeCheckboxes {
+		if vs, ok := o.data.(map[string]any); ok {
+			if vl, ok := vs["visible"].([]any); ok {
+				for _, v := range vl {
+					if vv, _ := v.(string); vv == "content" {
+						return true
+					}
+				}
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // minQuotes return 3 or more back-quotes.
 // If n back-quotes exists, use n+1 back-quotes to quote.
 func minQuotes(value string) string {
 	ret := "```"
-	for _, v := range minQuotesRegex.FindAllString(value, -1) {
+	for _, v := range globalVars().minQuotesRegex.FindAllString(value, -1) {
 		if len(v) >= len(ret) {
 			ret = v + "`"
 		}

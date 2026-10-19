@@ -4,15 +4,15 @@
 package user
 
 import (
-	"fmt"
 	"net/http"
 
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/setting"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/services/convert"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	user_service "gitea.dev/services/user"
 )
 
 // ListEmails list all of the authenticated user's email addresses
@@ -29,7 +29,7 @@ func ListEmails(ctx *context.APIContext) {
 
 	emails, err := user_model.GetEmailAddresses(ctx, ctx.Doer.ID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetEmailAddresses", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	apiEmails := make([]*api.Email, len(emails))
@@ -54,48 +54,40 @@ func AddEmail(ctx *context.APIContext) {
 	// responses:
 	//   '201':
 	//     "$ref": "#/responses/EmailList"
+	//   "400":
+	//     "$ref": "#/responses/error"
+	//   "409":
+	//     "$ref": "#/responses/error"
 	//   "422":
 	//     "$ref": "#/responses/validationError"
-	form := web.GetForm(ctx).(*api.CreateEmailOption)
+
+	if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageCredentials) {
+		ctx.APIErrorNotFound("emails are not allowed to be changed")
+		return
+	}
+
+	form := web.GetForm[*api.CreateEmailOption](ctx)
 	if len(form.Emails) == 0 {
-		ctx.Error(http.StatusUnprocessableEntity, "", "Email list empty")
+		ctx.APIError(http.StatusUnprocessableEntity, "Email list empty")
 		return
 	}
 
-	emails := make([]*user_model.EmailAddress, len(form.Emails))
-	for i := range form.Emails {
-		emails[i] = &user_model.EmailAddress{
-			UID:         ctx.Doer.ID,
-			Email:       form.Emails[i],
-			IsActivated: !setting.Service.RegisterEmailConfirm,
-		}
-	}
-
-	if err := user_model.AddEmailAddresses(ctx, emails); err != nil {
-		if user_model.IsErrEmailAlreadyUsed(err) {
-			ctx.Error(http.StatusUnprocessableEntity, "", "Email address has been used: "+err.(user_model.ErrEmailAlreadyUsed).Email)
-		} else if user_model.IsErrEmailCharIsNotSupported(err) || user_model.IsErrEmailInvalid(err) {
-			email := ""
-			if typedError, ok := err.(user_model.ErrEmailInvalid); ok {
-				email = typedError.Email
-			}
-			if typedError, ok := err.(user_model.ErrEmailCharIsNotSupported); ok {
-				email = typedError.Email
-			}
-
-			errMsg := fmt.Sprintf("Email address %q invalid", email)
-			ctx.Error(http.StatusUnprocessableEntity, "", errMsg)
-		} else {
-			ctx.Error(http.StatusInternalServerError, "AddEmailAddresses", err)
-		}
+	if err := user_service.AddEmailAddresses(ctx, ctx.Doer, form.Emails); err != nil {
+		ctx.APIErrorAuto(err)
 		return
 	}
 
-	apiEmails := make([]*api.Email, len(emails))
-	for i := range emails {
-		apiEmails[i] = convert.ToEmail(emails[i])
+	emails, err := user_model.GetEmailAddresses(ctx, ctx.Doer.ID)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
 	}
-	ctx.JSON(http.StatusCreated, &apiEmails)
+
+	apiEmails := make([]*api.Email, 0, len(emails))
+	for _, email := range emails {
+		apiEmails = append(apiEmails, convert.ToEmail(email))
+	}
+	ctx.JSON(http.StatusCreated, apiEmails)
 }
 
 // DeleteEmail delete email
@@ -115,26 +107,24 @@ func DeleteEmail(ctx *context.APIContext) {
 	//     "$ref": "#/responses/empty"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
-	form := web.GetForm(ctx).(*api.DeleteEmailOption)
+
+	if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageCredentials) {
+		ctx.APIErrorNotFound("emails are not allowed to be changed")
+		return
+	}
+
+	form := web.GetForm[*api.DeleteEmailOption](ctx)
 	if len(form.Emails) == 0 {
 		ctx.Status(http.StatusNoContent)
 		return
 	}
 
-	emails := make([]*user_model.EmailAddress, len(form.Emails))
-	for i := range form.Emails {
-		emails[i] = &user_model.EmailAddress{
-			Email: form.Emails[i],
-			UID:   ctx.Doer.ID,
-		}
-	}
-
-	if err := user_model.DeleteEmailAddresses(ctx, emails); err != nil {
+	if err := user_service.DeleteEmailAddresses(ctx, ctx.Doer, form.Emails); err != nil {
 		if user_model.IsErrEmailAddressNotExist(err) {
-			ctx.Error(http.StatusNotFound, "DeleteEmailAddresses", err)
-			return
+			ctx.APIError(http.StatusNotFound, err.Error())
+		} else {
+			ctx.APIErrorInternal(err)
 		}
-		ctx.Error(http.StatusInternalServerError, "DeleteEmailAddresses", err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)

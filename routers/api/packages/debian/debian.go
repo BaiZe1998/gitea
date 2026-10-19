@@ -11,22 +11,21 @@ import (
 	"net/http"
 	"strings"
 
-	"code.gitea.io/gitea/models/db"
-	packages_model "code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/modules/context"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	debian_module "code.gitea.io/gitea/modules/packages/debian"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	notify_service "code.gitea.io/gitea/services/notify"
-	packages_service "code.gitea.io/gitea/services/packages"
-	debian_service "code.gitea.io/gitea/services/packages/debian"
+	"gitea.dev/models/db"
+	packages_model "gitea.dev/models/packages"
+	packages_module "gitea.dev/modules/packages"
+	debian_module "gitea.dev/modules/packages/debian"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	notify_service "gitea.dev/services/notify"
+	packages_service "gitea.dev/services/packages"
+	debian_service "gitea.dev/services/packages/debian"
 )
 
 func apiError(ctx *context.Context, status int, obj any) {
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		ctx.PlainText(status, message)
-	})
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	ctx.PlainText(status, message)
 }
 
 func GetRepositoryKey(ctx *context.Context) {
@@ -36,7 +35,7 @@ func GetRepositoryKey(ctx *context.Context) {
 		return
 	}
 
-	ctx.ServeContent(strings.NewReader(pub), &context.ServeHeaderOptions{
+	ctx.ServeContent(strings.NewReader(pub), context.ServeHeaderOptions{
 		ContentType: "application/pgp-keys",
 		Filename:    "repository.key",
 	})
@@ -51,28 +50,25 @@ func GetRepositoryFile(ctx *context.Context) {
 		return
 	}
 
-	key := ctx.Params("distribution")
+	key := ctx.PathParam("distribution")
 
-	component := ctx.Params("component")
-	architecture := strings.TrimPrefix(ctx.Params("architecture"), "binary-")
+	component := ctx.PathParam("component")
+	architecture := strings.TrimPrefix(ctx.PathParam("architecture"), "binary-")
 	if component != "" && architecture != "" {
 		key += "|" + component + "|" + architecture
 	}
 
-	s, u, pf, err := packages_service.GetFileStreamByPackageVersion(
+	s, u, pf, err := packages_service.OpenFileForDownloadByPackageVersion(
 		ctx,
 		pv,
 		&packages_service.PackageFileInfo{
-			Filename:     ctx.Params("filename"),
+			Filename:     ctx.PathParam("filename"),
 			CompositeKey: key,
 		},
+		ctx.Req.Method,
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist || err == packages_model.ErrPackageFileNotExist {
-			apiError(ctx, http.StatusNotFound, err)
-		} else {
-			apiError(ctx, http.StatusInternalServerError, err)
-		}
+		apiError(ctx, helper.PackageErrorStatus(err), err)
 		return
 	}
 
@@ -87,14 +83,14 @@ func GetRepositoryFileByHash(ctx *context.Context) {
 		return
 	}
 
-	algorithm := strings.ToLower(ctx.Params("algorithm"))
+	algorithm := strings.ToLower(ctx.PathParam("algorithm"))
 	if algorithm == "md5sum" {
 		algorithm = "md5"
 	}
 
 	pfs, _, err := packages_model.SearchFiles(ctx, &packages_model.PackageFileSearchOptions{
 		VersionID:     pv.ID,
-		Hash:          strings.ToLower(ctx.Params("hash")),
+		Hash:          strings.ToLower(ctx.PathParam("hash")),
 		HashAlgorithm: algorithm,
 	})
 	if err != nil {
@@ -106,7 +102,7 @@ func GetRepositoryFileByHash(ctx *context.Context) {
 		return
 	}
 
-	s, u, pf, err := packages_service.GetPackageFileStream(ctx, pfs[0])
+	s, u, pf, err := packages_service.OpenFileForDownload(ctx, pfs[0], ctx.Req.Method)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
@@ -120,19 +116,19 @@ func GetRepositoryFileByHash(ctx *context.Context) {
 }
 
 func UploadPackageFile(ctx *context.Context) {
-	distribution := strings.TrimSpace(ctx.Params("distribution"))
-	component := strings.TrimSpace(ctx.Params("component"))
-	if distribution == "" || component == "" {
+	distribution := ctx.PathParam("distribution")
+	component := ctx.PathParam("component")
+	if !debian_module.IsValidDistributionOrComponent(distribution) || !debian_module.IsValidDistributionOrComponent(component) {
 		apiError(ctx, http.StatusBadRequest, "invalid distribution or component")
 		return
 	}
 
-	upload, close, err := ctx.UploadStream()
+	upload, needToClose, err := ctx.UploadStream()
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
 	}
-	if close {
+	if needToClose {
 		defer upload.Close()
 	}
 
@@ -207,10 +203,10 @@ func UploadPackageFile(ctx *context.Context) {
 }
 
 func DownloadPackageFile(ctx *context.Context) {
-	name := ctx.Params("name")
-	version := ctx.Params("version")
+	name := ctx.PathParam("name")
+	version := ctx.PathParam("version")
 
-	s, u, pf, err := packages_service.GetFileStreamByPackageNameAndVersion(
+	s, u, pf, err := packages_service.OpenFileForDownloadByPackageNameAndVersion(
 		ctx,
 		&packages_service.PackageInfo{
 			Owner:       ctx.Package.Owner,
@@ -219,9 +215,10 @@ func DownloadPackageFile(ctx *context.Context) {
 			Version:     version,
 		},
 		&packages_service.PackageFileInfo{
-			Filename:     fmt.Sprintf("%s_%s_%s.deb", name, version, ctx.Params("architecture")),
-			CompositeKey: fmt.Sprintf("%s|%s", ctx.Params("distribution"), ctx.Params("component")),
+			Filename:     fmt.Sprintf("%s_%s_%s.deb", name, version, ctx.PathParam("architecture")),
+			CompositeKey: fmt.Sprintf("%s|%s", ctx.PathParam("distribution"), ctx.PathParam("component")),
 		},
+		ctx.Req.Method,
 	)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
@@ -232,7 +229,7 @@ func DownloadPackageFile(ctx *context.Context) {
 		return
 	}
 
-	helper.ServePackageFile(ctx, s, u, pf, &context.ServeHeaderOptions{
+	helper.ServePackageFile(ctx, s, u, pf, context.ServeHeaderOptions{
 		ContentType:  "application/vnd.debian.binary-package",
 		Filename:     pf.Name,
 		LastModified: pf.CreatedUnix.AsLocalTime(),
@@ -240,11 +237,11 @@ func DownloadPackageFile(ctx *context.Context) {
 }
 
 func DeletePackageFile(ctx *context.Context) {
-	distribution := ctx.Params("distribution")
-	component := ctx.Params("component")
-	name := ctx.Params("name")
-	version := ctx.Params("version")
-	architecture := ctx.Params("architecture")
+	distribution := ctx.PathParam("distribution")
+	component := ctx.PathParam("component")
+	name := ctx.PathParam("name")
+	version := ctx.PathParam("version")
+	architecture := ctx.PathParam("architecture")
 
 	owner := ctx.Package.Owner
 

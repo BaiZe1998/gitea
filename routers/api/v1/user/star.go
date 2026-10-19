@@ -5,34 +5,43 @@
 package user
 
 import (
-	std_context "context"
+	"errors"
 	"net/http"
 
-	"code.gitea.io/gitea/models/db"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/context"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
-	"code.gitea.io/gitea/services/convert"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
 )
 
 // getStarredRepos returns the repos that the user with the specified userID has
 // starred
-func getStarredRepos(ctx std_context.Context, user *user_model.User, private bool, listOptions db.ListOptions) ([]*api.Repository, error) {
-	starredRepos, err := repo_model.GetStarredRepos(ctx, user.ID, private, listOptions)
+func getStarredRepos(ctx *context.APIContext, user *user_model.User, private bool) ([]*api.Repository, error) {
+	opts := &repo_model.StarredReposOptions{
+		ListOptions:    utils.GetListOptions(ctx),
+		StarrerID:      user.ID,
+		IncludePrivate: private,
+		Actor:          ctx.Doer,
+	}
+
+	starredRepos, err := repo_model.GetStarredRepos(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	repos := make([]*api.Repository, len(starredRepos))
-	for i, starred := range starredRepos {
-		permission, err := access_model.GetUserRepoPermission(ctx, starred, user)
+	repos := make([]*api.Repository, 0, len(starredRepos))
+	for _, starred := range starredRepos {
+		permission, err := access_model.GetIndividualUserRepoPermission(ctx, starred, user)
 		if err != nil {
 			return nil, err
 		}
-		repos[i] = convert.ToRepo(ctx, starred, permission)
+		if !permission.HasAnyUnitAccessOrPublicAccess() {
+			continue
+		}
+		repos = append(repos, convert.ToRepo(ctx, starred, permission))
 	}
 	return repos, nil
 }
@@ -47,7 +56,7 @@ func GetStarredRepos(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user
+	//   description: username of the user whose starred repos are to be listed
 	//   type: string
 	//   required: true
 	// - name: page
@@ -63,14 +72,17 @@ func GetStarredRepos(ctx *context.APIContext) {
 	//     "$ref": "#/responses/RepositoryList"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
 
 	private := ctx.ContextUser.ID == ctx.Doer.ID
-	repos, err := getStarredRepos(ctx, ctx.ContextUser, private, utils.GetListOptions(ctx))
+	repos, err := getStarredRepos(ctx, ctx.ContextUser, private)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "getStarredRepos", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
+	ctx.SetLinkHeader(int64(ctx.ContextUser.NumStars), utils.GetListOptions(ctx).PageSize)
 	ctx.SetTotalCountHeader(int64(ctx.ContextUser.NumStars))
 	ctx.JSON(http.StatusOK, &repos)
 }
@@ -94,12 +106,15 @@ func GetMyStarredRepos(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/RepositoryList"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
 
-	repos, err := getStarredRepos(ctx, ctx.Doer, true, utils.GetListOptions(ctx))
+	repos, err := getStarredRepos(ctx, ctx.Doer, true)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "getStarredRepos", err)
+		ctx.APIErrorInternal(err)
 	}
 
+	ctx.SetLinkHeader(int64(ctx.Doer.NumStars), utils.GetListOptions(ctx).PageSize)
 	ctx.SetTotalCountHeader(int64(ctx.Doer.NumStars))
 	ctx.JSON(http.StatusOK, &repos)
 }
@@ -125,11 +140,13 @@ func IsStarring(ctx *context.APIContext) {
 	//     "$ref": "#/responses/empty"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
 
 	if repo_model.IsStaring(ctx, ctx.Doer.ID, ctx.Repo.Repository.ID) {
 		ctx.Status(http.StatusNoContent)
 	} else {
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 	}
 }
 
@@ -152,12 +169,18 @@ func Star(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	err := repo_model.StarRepo(ctx, ctx.Doer.ID, ctx.Repo.Repository.ID, true)
+	err := repo_model.StarRepo(ctx, ctx.Doer, ctx.Repo.Repository, true)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "StarRepo", err)
+		if errors.Is(err, user_model.ErrBlockedUser) {
+			ctx.APIError(http.StatusForbidden, err.Error())
+		} else {
+			ctx.APIErrorInternal(err)
+		}
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -184,10 +207,12 @@ func Unstar(ctx *context.APIContext) {
 	//     "$ref": "#/responses/empty"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
 
-	err := repo_model.StarRepo(ctx, ctx.Doer.ID, ctx.Repo.Repository.ID, false)
+	err := repo_model.StarRepo(ctx, ctx.Doer, ctx.Repo.Repository, false)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "StarRepo", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)

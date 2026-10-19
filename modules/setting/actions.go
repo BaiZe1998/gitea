@@ -4,29 +4,59 @@
 package setting
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
+)
+
+const (
+	// some of the values are from GitHub defaults
+	defaultMaxRerunAttempts       = 50
+	defaultMaxConcurrentTaskPicks = 16
+	defaultArtifactRetentionDays  = 90
+	defaultLogRetentionDays       = 365
+	defaultRunRetentionDays       = 400
 )
 
 // Actions settings
 var (
 	Actions = struct {
-		LogStorage            *Storage // how the created logs should be stored
-		ArtifactStorage       *Storage // how the created artifacts should be stored
-		ArtifactRetentionDays int64    `ini:"ARTIFACT_RETENTION_DAYS"`
 		Enabled               bool
+		LogStorage            *Storage          // how the created logs should be stored
+		LogRetentionDays      int64             `ini:"LOG_RETENTION_DAYS"`
+		LogCompression        logCompression    `ini:"LOG_COMPRESSION"`
+		ArtifactStorage       *Storage          // how the created artifacts should be stored
+		ArtifactRetentionDays int64             `ini:"ARTIFACT_RETENTION_DAYS"`
+		RunRetentionDays      int64             `ini:"RUN_RETENTION_DAYS"`
 		DefaultActionsURL     defaultActionsURL `ini:"DEFAULT_ACTIONS_URL"`
 		ZombieTaskTimeout     time.Duration     `ini:"ZOMBIE_TASK_TIMEOUT"`
 		EndlessTaskTimeout    time.Duration     `ini:"ENDLESS_TASK_TIMEOUT"`
 		AbandonedJobTimeout   time.Duration     `ini:"ABANDONED_JOB_TIMEOUT"`
-		SkipWorkflowStrings   []string          `ìni:"SKIP_WORKFLOW_STRINGS"`
+		SkipWorkflowStrings   []string          `ini:"SKIP_WORKFLOW_STRINGS"`
+		WorkflowDirs          []string          `ini:"WORKFLOW_DIRS"`
+		ScopedWorkflowDirs    []string          `ini:"SCOPED_WORKFLOW_DIRS"`
+		MaxRerunAttempts      int64             `ini:"MAX_RERUN_ATTEMPTS"`
+		// MaxConcurrentTaskPicks bounds how many runners may run the task-assignment
+		// transaction at once per Gitea instance, to avoid a thundering herd when many
+		// runners poll together. It is a per-process limit, not a cluster-wide one.
+		MaxConcurrentTaskPicks int `ini:"MAX_CONCURRENT_TASK_PICKS"`
+
+		ArtifactPreviewMaxSize int64 `ini:"ARTIFACT_PREVIEW_MAX_SIZE"`
 	}{
-		Enabled:             true,
-		DefaultActionsURL:   defaultActionsURLGitHub,
-		SkipWorkflowStrings: []string{"[skip ci]", "[ci skip]", "[no ci]", "[skip actions]", "[actions skip]"},
+		Enabled:                true,
+		DefaultActionsURL:      defaultActionsURLGitHub,
+		SkipWorkflowStrings:    []string{"[skip ci]", "[ci skip]", "[no ci]", "[skip actions]", "[actions skip]"},
+		WorkflowDirs:           []string{".gitea/workflows", ".github/workflows"},
+		ScopedWorkflowDirs:     []string{".gitea/scoped_workflows"},
+		MaxRerunAttempts:       defaultMaxRerunAttempts,
+		MaxConcurrentTaskPicks: defaultMaxConcurrentTaskPicks,
+		ArtifactPreviewMaxSize: 10 * 1024 * 1024,
+		LogRetentionDays:       defaultLogRetentionDays,
+		ArtifactRetentionDays:  defaultArtifactRetentionDays,
+		RunRetentionDays:       defaultRunRetentionDays,
 	}
 )
 
@@ -53,6 +83,20 @@ const (
 	// please consider to use `uses: https://the_url_you_want_to_use/username/action_name@version` instead.
 )
 
+type logCompression string
+
+func (c logCompression) IsValid() bool {
+	return c.IsNone() || c.IsZstd()
+}
+
+func (c logCompression) IsNone() bool {
+	return string(c) == "none"
+}
+
+func (c logCompression) IsZstd() bool {
+	return c == "" || string(c) == "zstd"
+}
+
 func loadActionsFrom(rootCfg ConfigProvider) error {
 	sec := rootCfg.Section("actions")
 	err := sec.MapTo(&Actions)
@@ -61,7 +105,7 @@ func loadActionsFrom(rootCfg ConfigProvider) error {
 	}
 
 	if urls := string(Actions.DefaultActionsURL); urls != defaultActionsURLGitHub && urls != defaultActionsURLSelf {
-		url := strings.Split(urls, ",")[0]
+		url, _, _ := strings.Cut(urls, ",")
 		if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") {
 			log.Error("[actions] DEFAULT_ACTIONS_URL does not support %q as custom URL any longer, fallback to %q",
 				urls,
@@ -82,15 +126,51 @@ func loadActionsFrom(rootCfg ConfigProvider) error {
 	actionsSec, _ := rootCfg.GetSection("actions.artifacts")
 
 	Actions.ArtifactStorage, err = getStorage(rootCfg, "actions_artifacts", "", actionsSec)
-
-	// default to 90 days in Github Actions
-	if Actions.ArtifactRetentionDays <= 0 {
-		Actions.ArtifactRetentionDays = 90
+	if err != nil {
+		return err
 	}
 
 	Actions.ZombieTaskTimeout = sec.Key("ZOMBIE_TASK_TIMEOUT").MustDuration(10 * time.Minute)
 	Actions.EndlessTaskTimeout = sec.Key("ENDLESS_TASK_TIMEOUT").MustDuration(3 * time.Hour)
 	Actions.AbandonedJobTimeout = sec.Key("ABANDONED_JOB_TIMEOUT").MustDuration(24 * time.Hour)
 
-	return err
+	if !Actions.LogCompression.IsValid() {
+		return fmt.Errorf("invalid [actions] LOG_COMPRESSION: %q", Actions.LogCompression)
+	}
+
+	workflowDirs := normalizeWorkflowDirs(Actions.WorkflowDirs)
+	if len(workflowDirs) == 0 {
+		return errors.New("[actions] WORKFLOW_DIRS must contain at least one entry")
+	}
+	Actions.WorkflowDirs = workflowDirs
+
+	// SCOPED_WORKFLOW_DIRS may be empty (feature disabled), but it must not overlap with WORKFLOW_DIRS:
+	// a scoped dir nested in (or equal to) a workflow dir would make the same file run both repo-level and scope-level.
+	Actions.ScopedWorkflowDirs = normalizeWorkflowDirs(Actions.ScopedWorkflowDirs)
+	for _, scopedDir := range Actions.ScopedWorkflowDirs {
+		for _, workflowDir := range Actions.WorkflowDirs {
+			if scopedDir == workflowDir ||
+				strings.HasPrefix(scopedDir, workflowDir+"/") ||
+				strings.HasPrefix(workflowDir, scopedDir+"/") {
+				return fmt.Errorf("[actions] SCOPED_WORKFLOW_DIRS entry %q overlaps with WORKFLOW_DIRS entry %q", scopedDir, workflowDir)
+			}
+		}
+	}
+
+	return nil
+}
+
+// normalizeWorkflowDirs trims, normalizes separators and drops empty/trailing-slash entries.
+func normalizeWorkflowDirs(dirs []string) []string {
+	normalized := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		dir = strings.ReplaceAll(dir, `\`, `/`)
+		dir = strings.TrimRight(dir, "/")
+		normalized = append(normalized, dir)
+	}
+	return normalized
 }

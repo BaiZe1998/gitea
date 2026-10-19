@@ -6,11 +6,11 @@ package misc
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/options"
-	repo_module "code.gitea.io/gitea/modules/repository"
-	"code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/options"
+	repo_module "gitea.dev/modules/repository"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	"gitea.dev/services/context"
 )
 
 // Shows a list of all Gitignore templates
@@ -44,11 +44,11 @@ func GetGitignoreTemplateInfo(ctx *context.APIContext) {
 	//     "$ref": "#/responses/GitignoreTemplateInfo"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
-	name := util.PathJoinRelX(ctx.Params("name"))
+	name := util.PathJoinRelX(ctx.PathParam("name"))
 
 	text, err := options.Gitignore(name)
 	if err != nil {
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 		return
 	}
 

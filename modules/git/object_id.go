@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+
+	"gitea.dev/modules/util"
 )
 
 type ObjectID interface {
 	String() string
+	RefName() RefName
 	IsZero() bool
 	RawValue() []byte
 	Type() ObjectFormat
@@ -18,8 +21,14 @@ type ObjectID interface {
 
 type Sha1Hash [20]byte
 
+var _ ObjectID = (*Sha1Hash)(nil)
+
 func (h *Sha1Hash) String() string {
 	return hex.EncodeToString(h[:])
+}
+
+func (h *Sha1Hash) RefName() RefName {
+	return RefName(h.String())
 }
 
 func (h *Sha1Hash) IsZero() bool {
@@ -29,8 +38,6 @@ func (h *Sha1Hash) IsZero() bool {
 func (h *Sha1Hash) RawValue() []byte { return h[:] }
 func (*Sha1Hash) Type() ObjectFormat { return Sha1ObjectFormat }
 
-var _ ObjectID = &Sha1Hash{}
-
 func MustIDFromString(hexHash string) ObjectID {
 	id, err := NewIDFromString(hexHash)
 	if err != nil {
@@ -39,9 +46,28 @@ func MustIDFromString(hexHash string) ObjectID {
 	return id
 }
 
+type Sha256Hash [32]byte
+
+var _ ObjectID = (*Sha256Hash)(nil)
+
+func (h *Sha256Hash) String() string {
+	return hex.EncodeToString(h[:])
+}
+
+func (h *Sha256Hash) RefName() RefName {
+	return RefName(h.String())
+}
+
+func (h *Sha256Hash) IsZero() bool {
+	empty := Sha256Hash{}
+	return bytes.Equal(empty[:], h[:])
+}
+func (h *Sha256Hash) RawValue() []byte { return h[:] }
+func (*Sha256Hash) Type() ObjectFormat { return Sha256ObjectFormat }
+
 func NewIDFromString(hexHash string) (ObjectID, error) {
 	var theObjectFormat ObjectFormat
-	for _, objectFormat := range SupportedObjectFormats {
+	for _, objectFormat := range DefaultFeatures().SupportedObjectFormats {
 		if len(hexHash) == objectFormat.FullLength() {
 			theObjectFormat = objectFormat
 			break
@@ -81,10 +107,36 @@ func ComputeBlobHash(hashType ObjectFormat, content []byte) ObjectID {
 	return hashType.ComputeHash(ObjectBlob, content)
 }
 
-type ErrInvalidSHA struct {
-	SHA string
+func IsStringValidObjectID(objFmt ObjectFormat, s string, optMinLen ...int) bool {
+	if objFmt == invalidObjectFormat {
+		return false
+	}
+	var minLen, maxLen int
+	if objFmt != nil {
+		maxLen = objFmt.FullLength()
+		minLen = util.OptionalArg(optMinLen, maxLen)
+	} else {
+		if len(optMinLen) == 0 {
+			// if no "min length" is applied, then the length must exactly match one of the formats
+			if len(s) != Sha1ObjectFormat.FullLength() && len(s) != Sha256ObjectFormat.FullLength() {
+				return false
+			}
+		}
+		maxLen = Sha256ObjectFormat.FullLength()
+		minLen = util.OptionalArg(optMinLen, Sha1ObjectFormat.FullLength())
+	}
+	if len(s) < minLen || len(s) > maxLen {
+		return false
+	}
+	return isStringLowerHex(s)
 }
 
-func (err ErrInvalidSHA) Error() string {
-	return fmt.Sprintf("invalid sha: %s", err.SHA)
+func isStringLowerHex(s string) bool {
+	for _, c := range s {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isHex {
+			return false
+		}
+	}
+	return len(s) > 0 // it accepts odd length because "shorten commit id" can be 7-chars
 }

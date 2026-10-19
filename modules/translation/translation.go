@@ -5,15 +5,16 @@ package translation
 
 import (
 	"context"
+	"html/template"
 	"sort"
 	"strings"
 	"sync"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/options"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/translation/i18n"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/options"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/translation/i18n"
+	"gitea.dev/modules/util"
 
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
@@ -24,13 +25,7 @@ type contextKey struct{}
 
 var ContextKey any = &contextKey{}
 
-// Locale represents an interface to translation
-type Locale interface {
-	Language() string
-	Tr(string, ...any) string
-	TrN(cnt any, key1, keyN string, args ...any) string
-	PrettyNumber(v any) string
-}
+type Locale = i18n.LocaleTranslation
 
 // LangType represents a lang type
 type LangType struct {
@@ -70,6 +65,9 @@ func InitLocales(ctx context.Context) {
 
 		localeData := make(map[string][]byte, len(localeNames))
 		for _, name := range localeNames {
+			if !strings.HasPrefix(name, "locale_") || !strings.HasSuffix(name, ".json") {
+				continue
+			}
 			localeData[name], err = options.Locale(name)
 			if err != nil {
 				log.Fatal("Failed to load %s locale file. %v", name, err)
@@ -86,14 +84,14 @@ func InitLocales(ctx context.Context) {
 			var localeDataBase []byte
 			if i == 0 && setting.Langs[0] != "en-US" {
 				// Only en-US has complete translations. When use other language as default, the en-US should still be used as fallback.
-				localeDataBase = localeData["locale_en-US.ini"]
+				localeDataBase = localeData["locale_en-US.json"]
 				if localeDataBase == nil {
-					log.Fatal("Failed to load locale_en-US.ini file.")
+					log.Fatal("Failed to load locale_en-US.json file.")
 				}
 			}
 
-			key := "locale_" + setting.Langs[i] + ".ini"
-			if err = i18n.DefaultLocales.AddLocaleByIni(setting.Langs[i], setting.Names[i], localeDataBase, localeData[key]); err != nil {
+			key := "locale_" + setting.Langs[i] + ".json"
+			if err = i18n.DefaultLocales.AddLocaleByJSON(setting.Langs[i], setting.Names[i], localeDataBase, localeData[key]); err != nil {
 				log.Error("Failed to set messages to %s: %v", setting.Langs[i], err)
 			}
 		}
@@ -140,9 +138,11 @@ func Match(tags ...language.Tag) language.Tag {
 // locale represents the information of localization.
 type locale struct {
 	i18n.Locale
-	Lang, LangName string // these fields are used directly in templates: .i18n.Lang
+	Lang, LangName string // these fields are used directly in templates: ctx.Locale.Lang
 	msgPrinter     *message.Printer
 }
+
+var _ Locale = (*locale)(nil)
 
 // NewLocale return a locale
 func NewLocale(lang string) Locale {
@@ -216,8 +216,12 @@ var trNLangRules = map[string]func(int64) int{
 	},
 }
 
+func (l *locale) Tr(s string, args ...any) template.HTML {
+	return l.TrHTML(s, args...)
+}
+
 // TrN returns translated message for plural text translation
-func (l *locale) TrN(cnt any, key1, keyN string, args ...any) string {
+func (l *locale) TrN(cnt any, key1, keyN string, args ...any) template.HTML {
 	var c int64
 	if t, ok := cnt.(int); ok {
 		c = int64(t)

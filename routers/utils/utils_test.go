@@ -4,59 +4,17 @@
 package utils
 
 import (
+	"html/template"
 	"testing"
-
-	"code.gitea.io/gitea/modules/setting"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRemoveUsernameParameterSuffix(t *testing.T) {
-	assert.Equal(t, "foobar", RemoveUsernameParameterSuffix("foobar (Foo Bar)"))
-	assert.Equal(t, "foobar", RemoveUsernameParameterSuffix("foobar"))
-	assert.Equal(t, "", RemoveUsernameParameterSuffix(""))
-}
-
-func TestIsExternalURL(t *testing.T) {
-	setting.AppURL = "https://try.gitea.io/"
-	type test struct {
-		Expected bool
-		RawURL   string
-	}
-	newTest := func(expected bool, rawURL string) test {
-		return test{Expected: expected, RawURL: rawURL}
-	}
-	for _, test := range []test{
-		newTest(false,
-			"https://try.gitea.io"),
-		newTest(true,
-			"https://example.com/"),
-		newTest(true,
-			"//example.com"),
-		newTest(true,
-			"http://example.com"),
-		newTest(false,
-			"a/"),
-		newTest(false,
-			"https://try.gitea.io/test?param=false"),
-		newTest(false,
-			"test?param=false"),
-		newTest(false,
-			"//try.gitea.io/test?param=false"),
-		newTest(false,
-			"/hey/hey/hey#3244"),
-		newTest(true,
-			"://missing protocol scheme"),
-	} {
-		assert.Equal(t, test.Expected, IsExternalURL(test.RawURL))
-	}
-}
-
-func TestSanitizeFlashErrorString(t *testing.T) {
+func TestEscapeFlashErrorString(t *testing.T) {
 	tests := []struct {
 		name string
 		arg  string
-		want string
+		want template.HTML
 	}{
 		{
 			name: "no error",
@@ -71,15 +29,14 @@ func TestSanitizeFlashErrorString(t *testing.T) {
 		{
 			name: "line break error",
 			arg:  "some error:\n\nawesome!",
-			want: "some error:<br><br>awesome!",
+			want: "some error:\n\nawesome!",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := SanitizeFlashErrorString(tt.arg); got != tt.want {
-				t.Errorf("SanitizeFlashErrorString() = '%v', want '%v'", got, tt.want)
-			}
+			got := EscapeFlashErrorString(tt.arg)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

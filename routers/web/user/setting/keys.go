@@ -5,24 +5,33 @@
 package setting
 
 import (
+	"errors"
 	"net/http"
 
-	asymkey_model "code.gitea.io/gitea/models/asymkey"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/web"
-	asymkey_service "code.gitea.io/gitea/services/asymkey"
-	"code.gitea.io/gitea/services/forms"
+	asymkey_model "gitea.dev/models/asymkey"
+	audit_model "gitea.dev/models/audit"
+	"gitea.dev/models/db"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/web"
+	asymkey_service "gitea.dev/services/asymkey"
+	"gitea.dev/services/audit"
+	"gitea.dev/services/context"
+	"gitea.dev/services/forms"
 )
 
 const (
-	tplSettingsKeys base.TplName = "user/settings/keys"
+	tplSettingsKeys templates.TplName = "user/settings/keys"
 )
 
 // Keys render user's SSH/GPG public keys page
 func Keys(ctx *context.Context) {
+	if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageSSHKeys, setting.UserFeatureManageGPGKeys) {
+		ctx.NotFound(errors.New("keys setting is not allowed to be changed"))
+		return
+	}
+
 	ctx.Data["Title"] = ctx.Tr("settings.ssh_gpg_keys")
 	ctx.Data["PageIsSettingsKeys"] = true
 	ctx.Data["DisableSSH"] = setting.SSH.Disabled
@@ -36,8 +45,8 @@ func Keys(ctx *context.Context) {
 
 // KeysPost response for change user's SSH/GPG keys
 func KeysPost(ctx *context.Context) {
-	form := web.GetForm(ctx).(*forms.AddKeyForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	form := web.GetForm[*forms.AddKeyForm](ctx)
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsKeys"] = true
 	ctx.Data["DisableSSH"] = setting.SSH.Disabled
 	ctx.Data["BuiltinSSH"] = setting.SSH.StartBuiltinServer
@@ -61,22 +70,31 @@ func KeysPost(ctx *context.Context) {
 			ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
 			return
 		}
-		if _, err = asymkey_model.AddPrincipalKey(ctx, ctx.Doer.ID, content, 0); err != nil {
+		key, err := asymkey_service.AddPrincipalKey(ctx, ctx.Doer.ID, content, 0)
+		if err != nil {
 			ctx.Data["HasPrincipalError"] = true
 			switch {
 			case asymkey_model.IsErrKeyAlreadyExist(err), asymkey_model.IsErrKeyNameAlreadyUsed(err):
 				loadKeysData(ctx)
 
 				ctx.Data["Err_Content"] = true
-				ctx.RenderWithErr(ctx.Tr("settings.ssh_principal_been_used"), tplSettingsKeys, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.ssh_principal_been_used"), tplSettingsKeys, &form)
 			default:
 				ctx.ServerError("AddPrincipalKey", err)
 			}
 			return
 		}
+
+		audit.Record(ctx, audit_model.UserKeyPrincipalAdd, ctx.Doer, "key", key.Name)
+
 		ctx.Flash.Success(ctx.Tr("settings.add_principal_success", form.Content))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
 	case "gpg":
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageGPGKeys) {
+			ctx.NotFound(errors.New("gpg keys setting is not allowed to be visited"))
+			return
+		}
+
 		token := asymkey_model.VerificationToken(ctx.Doer, 1)
 		lastToken := asymkey_model.VerificationToken(ctx.Doer, 0)
 
@@ -86,6 +104,8 @@ func KeysPost(ctx *context.Context) {
 		}
 		if err != nil {
 			ctx.Data["HasGPGError"] = true
+			var errInvalidTokenSignature asymkey_model.ErrGPGInvalidTokenSignature
+			var errNoEmailFound asymkey_model.ErrGPGNoEmailFound
 			switch {
 			case asymkey_model.IsErrGPGKeyParsing(err):
 				ctx.Flash.Error(ctx.Tr("form.invalid_gpg_key", err.Error()))
@@ -94,24 +114,24 @@ func KeysPost(ctx *context.Context) {
 				loadKeysData(ctx)
 
 				ctx.Data["Err_Content"] = true
-				ctx.RenderWithErr(ctx.Tr("settings.gpg_key_id_used"), tplSettingsKeys, &form)
-			case asymkey_model.IsErrGPGInvalidTokenSignature(err):
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.gpg_key_id_used"), tplSettingsKeys, &form)
+			case errors.As(err, &errInvalidTokenSignature):
 				loadKeysData(ctx)
 				ctx.Data["Err_Content"] = true
 				ctx.Data["Err_Signature"] = true
-				keyID := err.(asymkey_model.ErrGPGInvalidTokenSignature).ID
+				keyID := errInvalidTokenSignature.ID
 				ctx.Data["KeyID"] = keyID
 				ctx.Data["PaddedKeyID"] = asymkey_model.PaddedKeyID(keyID)
-				ctx.RenderWithErr(ctx.Tr("settings.gpg_invalid_token_signature"), tplSettingsKeys, &form)
-			case asymkey_model.IsErrGPGNoEmailFound(err):
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.gpg_invalid_token_signature"), tplSettingsKeys, &form)
+			case errors.As(err, &errNoEmailFound):
 				loadKeysData(ctx)
 
 				ctx.Data["Err_Content"] = true
 				ctx.Data["Err_Signature"] = true
-				keyID := err.(asymkey_model.ErrGPGNoEmailFound).ID
+				keyID := errNoEmailFound.ID
 				ctx.Data["KeyID"] = keyID
 				ctx.Data["PaddedKeyID"] = asymkey_model.PaddedKeyID(keyID)
-				ctx.RenderWithErr(ctx.Tr("settings.gpg_no_key_email_found"), tplSettingsKeys, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.gpg_no_key_email_found"), tplSettingsKeys, &form)
 			default:
 				ctx.ServerError("AddPublicKey", err)
 			}
@@ -121,6 +141,8 @@ func KeysPost(ctx *context.Context) {
 		for _, key := range keys {
 			keyIDs += key.KeyID
 			keyIDs += ", "
+
+			audit.Record(ctx, audit_model.UserKeyGPGAdd, ctx.Doer, "gpg_key_id", key.KeyID)
 		}
 		if len(keyIDs) > 0 {
 			keyIDs = keyIDs[:len(keyIDs)-2]
@@ -137,22 +159,29 @@ func KeysPost(ctx *context.Context) {
 		}
 		if err != nil {
 			ctx.Data["HasGPGVerifyError"] = true
+			var errInvalidTokenSignature asymkey_model.ErrGPGInvalidTokenSignature
 			switch {
-			case asymkey_model.IsErrGPGInvalidTokenSignature(err):
+			case errors.As(err, &errInvalidTokenSignature):
 				loadKeysData(ctx)
 				ctx.Data["VerifyingID"] = form.KeyID
 				ctx.Data["Err_Signature"] = true
-				keyID := err.(asymkey_model.ErrGPGInvalidTokenSignature).ID
+				keyID := errInvalidTokenSignature.ID
 				ctx.Data["KeyID"] = keyID
 				ctx.Data["PaddedKeyID"] = asymkey_model.PaddedKeyID(keyID)
-				ctx.RenderWithErr(ctx.Tr("settings.gpg_invalid_token_signature"), tplSettingsKeys, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.gpg_invalid_token_signature"), tplSettingsKeys, &form)
 			default:
 				ctx.ServerError("VerifyGPG", err)
 			}
+			return
 		}
 		ctx.Flash.Success(ctx.Tr("settings.verify_gpg_key_success", keyID))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
 	case "ssh":
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageSSHKeys) {
+			ctx.NotFound(errors.New("ssh keys setting is not allowed to be visited"))
+			return
+		}
+
 		content, err := asymkey_model.CheckPublicKeyString(form.Content)
 		if err != nil {
 			if db.IsErrSSHDisabled(err) {
@@ -168,19 +197,20 @@ func KeysPost(ctx *context.Context) {
 			return
 		}
 
-		if _, err = asymkey_model.AddPublicKey(ctx, ctx.Doer.ID, form.Title, content, 0); err != nil {
+		key, err := asymkey_model.AddPublicKey(ctx, ctx.Doer.ID, form.Title, content, 0, false)
+		if err != nil {
 			ctx.Data["HasSSHError"] = true
 			switch {
 			case asymkey_model.IsErrKeyAlreadyExist(err):
 				loadKeysData(ctx)
 
 				ctx.Data["Err_Content"] = true
-				ctx.RenderWithErr(ctx.Tr("settings.ssh_key_been_used"), tplSettingsKeys, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.ssh_key_been_used"), tplSettingsKeys, &form)
 			case asymkey_model.IsErrKeyNameAlreadyUsed(err):
 				loadKeysData(ctx)
 
 				ctx.Data["Err_Title"] = true
-				ctx.RenderWithErr(ctx.Tr("settings.ssh_key_name_used"), tplSettingsKeys, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.ssh_key_name_used"), tplSettingsKeys, &form)
 			case asymkey_model.IsErrKeyUnableVerify(err):
 				ctx.Flash.Info(ctx.Tr("form.unable_verify_ssh_key"))
 				ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
@@ -189,9 +219,17 @@ func KeysPost(ctx *context.Context) {
 			}
 			return
 		}
+
+		audit.Record(ctx, audit_model.UserKeySSHAdd, ctx.Doer, "fingerprint", key.Fingerprint)
+
 		ctx.Flash.Success(ctx.Tr("settings.add_key_success", form.Title))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
 	case "verify_ssh":
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageSSHKeys) {
+			ctx.NotFound(errors.New("ssh keys setting is not allowed to be visited"))
+			return
+		}
+
 		token := asymkey_model.VerificationToken(ctx.Doer, 1)
 		lastToken := asymkey_model.VerificationToken(ctx.Doer, 0)
 
@@ -201,15 +239,17 @@ func KeysPost(ctx *context.Context) {
 		}
 		if err != nil {
 			ctx.Data["HasSSHVerifyError"] = true
+			var errInvalidTokenSignature asymkey_model.ErrSSHInvalidTokenSignature
 			switch {
-			case asymkey_model.IsErrSSHInvalidTokenSignature(err):
+			case errors.As(err, &errInvalidTokenSignature):
 				loadKeysData(ctx)
 				ctx.Data["Err_Signature"] = true
-				ctx.Data["Fingerprint"] = err.(asymkey_model.ErrSSHInvalidTokenSignature).Fingerprint
-				ctx.RenderWithErr(ctx.Tr("settings.ssh_invalid_token_signature"), tplSettingsKeys, &form)
+				ctx.Data["Fingerprint"] = errInvalidTokenSignature.Fingerprint
+				ctx.RenderWithErrDeprecated(ctx.Tr("settings.ssh_invalid_token_signature"), tplSettingsKeys, &form)
 			default:
 				ctx.ServerError("VerifySSH", err)
 			}
+			return
 		}
 		ctx.Flash.Success(ctx.Tr("settings.verify_ssh_key_success", fingerprint))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
@@ -224,12 +264,29 @@ func KeysPost(ctx *context.Context) {
 func DeleteKey(ctx *context.Context) {
 	switch ctx.FormString("type") {
 	case "gpg":
-		if err := asymkey_model.DeleteGPGKey(ctx, ctx.Doer, ctx.FormInt64("id")); err != nil {
-			ctx.Flash.Error("DeleteGPGKey: " + err.Error())
-		} else {
-			ctx.Flash.Success(ctx.Tr("settings.gpg_key_deletion_success"))
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageGPGKeys) {
+			ctx.JSONError("gpg keys setting is not allowed to be visited")
+			return
 		}
+		key, err := asymkey_model.GetGPGKeyForUserByID(ctx, ctx.Doer.ID, ctx.FormInt64("id"))
+		if err != nil && !asymkey_model.IsErrGPGKeyNotExist(err) {
+			ctx.ServerError("GetGPGKeyForUserByID", err)
+			return
+		}
+		if err := asymkey_model.DeleteGPGKey(ctx, ctx.Doer, ctx.FormInt64("id")); err != nil {
+			ctx.JSONError("Failed to delete PGP key")
+			return
+		}
+		if key != nil {
+			audit.Record(ctx, audit_model.UserKeyGPGRemove, ctx.Doer, "gpg_key_id", key.KeyID)
+		}
+		ctx.Flash.Success(ctx.Tr("settings.gpg_key_deletion_success"))
 	case "ssh":
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageSSHKeys) {
+			ctx.JSONError("ssh keys setting is not allowed to be visited")
+			return
+		}
+
 		keyID := ctx.FormInt64("id")
 		external, err := asymkey_model.PublicKeyIsExternallyManaged(ctx, keyID)
 		if err != nil {
@@ -237,24 +294,23 @@ func DeleteKey(ctx *context.Context) {
 			return
 		}
 		if external {
-			ctx.Flash.Error(ctx.Tr("settings.ssh_externally_managed"))
-			ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
+			ctx.JSONError(ctx.Tr("settings.ssh_externally_managed"))
 			return
 		}
 		if err := asymkey_service.DeletePublicKey(ctx, ctx.Doer, keyID); err != nil {
-			ctx.Flash.Error("DeletePublicKey: " + err.Error())
-		} else {
-			ctx.Flash.Success(ctx.Tr("settings.ssh_key_deletion_success"))
+			ctx.JSONError("Failed to delete SSH key")
+			return
 		}
+		ctx.Flash.Success(ctx.Tr("settings.ssh_key_deletion_success"))
 	case "principal":
 		if err := asymkey_service.DeletePublicKey(ctx, ctx.Doer, ctx.FormInt64("id")); err != nil {
-			ctx.Flash.Error("DeletePublicKey: " + err.Error())
-		} else {
-			ctx.Flash.Success(ctx.Tr("settings.ssh_principal_deletion_success"))
+			ctx.JSONError("Failed to delete SSH principal key")
+			return
 		}
+		ctx.Flash.Success(ctx.Tr("settings.ssh_principal_deletion_success"))
 	default:
-		ctx.Flash.Warning("Function not implemented")
-		ctx.Redirect(setting.AppSubURL + "/user/settings/keys")
+		ctx.JSONError("unsupported key type")
+		return
 	}
 	ctx.JSONRedirect(setting.AppSubURL + "/user/settings/keys")
 }
@@ -292,7 +348,7 @@ func loadKeysData(ctx *context.Context) {
 	ctx.Data["GPGKeys"] = gpgkeys
 	tokenToSign := asymkey_model.VerificationToken(ctx.Doer, 1)
 
-	// generate a new aes cipher using the csrfToken
+	// generate a new aes cipher using the token
 	ctx.Data["TokenToSign"] = tokenToSign
 
 	principals, err := db.Find[asymkey_model.PublicKey](ctx, asymkey_model.FindPublicKeyOptions{

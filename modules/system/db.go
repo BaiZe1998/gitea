@@ -6,10 +6,9 @@ package system
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/system"
-	"code.gitea.io/gitea/modules/json"
-
-	"github.com/yuin/goldmark/util"
+	"gitea.dev/models/system"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/util"
 )
 
 // DBStore can be used to store app state items in local filesystem
@@ -24,7 +23,7 @@ func (f *DBStore) Get(ctx context.Context, item StateItem) error {
 	if content == "" {
 		return nil
 	}
-	return json.Unmarshal(util.StringToReadOnlyBytes(content), item)
+	return json.Unmarshal(util.UnsafeStringToBytes(content), item)
 }
 
 // Set saves the state item
@@ -33,5 +32,5 @@ func (f *DBStore) Set(ctx context.Context, item StateItem) error {
 	if err != nil {
 		return err
 	}
-	return system.SaveAppStateContent(ctx, item.Name(), util.BytesToReadOnlyString(b))
+	return system.SaveAppStateContent(ctx, item.Name(), util.UnsafeBytesToString(b))
 }

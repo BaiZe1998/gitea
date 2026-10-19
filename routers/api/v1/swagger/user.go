@@ -4,8 +4,8 @@
 package swagger
 
 import (
-	activities_model "code.gitea.io/gitea/models/activities"
-	api "code.gitea.io/gitea/modules/structs"
+	activities_model "gitea.dev/models/activities"
+	api "gitea.dev/modules/structs"
 )
 
 // User
@@ -46,5 +46,12 @@ type swaggerResponseUserHeatmapData struct {
 // swagger:response UserSettings
 type swaggerResponseUserSettings struct {
 	// in:body
-	Body []api.UserSettings `json:"body"`
+	Body api.UserSettings `json:"body"`
+}
+
+// BadgeList
+// swagger:response BadgeList
+type swaggerResponseBadgeList struct {
+	// in:body
+	Body []api.Badge `json:"body"`
 }

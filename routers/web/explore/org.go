@@ -4,17 +4,25 @@
 package explore
 
 import (
-	"code.gitea.io/gitea/models/db"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/structs"
+	"gitea.dev/models/db"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	"gitea.dev/services/context"
 )
 
 // Organizations render explore organizations page
 func Organizations(ctx *context.Context) {
-	ctx.Data["UsersIsDisabled"] = setting.Service.Explore.DisableUsersPage
-	ctx.Data["Title"] = ctx.Tr("explore")
+	if setting.Service.Explore.DisableOrganizationsPage {
+		ctx.Redirect(setting.AppSubURL + "/explore")
+		return
+	}
+
+	ctx.Data["UsersPageIsDisabled"] = setting.Service.Explore.DisableUsersPage
+	ctx.Data["CodePageIsDisabled"] = setting.Service.Explore.DisableCodePage
+	ctx.Data["Title"] = ctx.Tr("explore_title")
 	ctx.Data["PageIsExplore"] = true
 	ctx.Data["PageIsExploreOrganizations"] = true
 	ctx.Data["IsRepoIndexerEnabled"] = setting.Indexer.RepoIndexerEnabled
@@ -24,14 +32,21 @@ func Organizations(ctx *context.Context) {
 		visibleTypes = append(visibleTypes, structs.VisibleTypeLimited, structs.VisibleTypePrivate)
 	}
 
-	if ctx.FormString("sort") == "" {
-		ctx.SetFormString("sort", setting.UI.ExploreDefaultSort)
-	}
-
-	RenderUserSearch(ctx, &user_model.SearchUserOptions{
+	supportedSortOrders := container.SetOf(
+		"newest",
+		"oldest",
+		"alphabetically",
+		"reversealphabetically",
+	)
+	sortOrderDefault := util.Iif(supportedSortOrders.Contains(setting.UI.ExploreDefaultSort), setting.UI.ExploreDefaultSort, "newest")
+	sortOrder := ctx.FormString("sort", sortOrderDefault)
+	RenderUserSearch(ctx, user_model.SearchUserOptions{
 		Actor:       ctx.Doer,
-		Type:        user_model.UserTypeOrganization,
+		Types:       []user_model.UserType{user_model.UserTypeOrganization},
 		ListOptions: db.ListOptions{PageSize: setting.UI.ExplorePagingNum},
 		Visible:     visibleTypes,
+		OrderBy:     db.SearchOrderBy(sortOrder),
+
+		SupportedSortOrders: supportedSortOrders,
 	}, tplExploreUsers)
 }

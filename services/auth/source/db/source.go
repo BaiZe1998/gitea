@@ -6,19 +6,21 @@ package db
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/auth"
-	user_model "code.gitea.io/gitea/models/user"
+	"gitea.dev/models/auth"
+	user_model "gitea.dev/models/user"
 )
 
 // Source is a password authentication service
-type Source struct{}
+type Source struct {
+	auth.ConfigBase `json:"-"`
+}
 
 // FromDB fills up an OAuth2Config from serialized format.
 func (source *Source) FromDB(bs []byte) error {
 	return nil
 }
 
-// ToDB exports an SMTPConfig to a serialized format.
+// ToDB exports the config to a byte slice to be saved into database (this method is just dummy and does nothing for DB source)
 func (source *Source) ToDB() ([]byte, error) {
 	return nil, nil
 }

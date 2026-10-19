@@ -7,14 +7,15 @@ import (
 	"net/http"
 	"time"
 
-	activities_model "code.gitea.io/gitea/models/activities"
-	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/context"
+	activities_model "gitea.dev/models/activities"
+	git_model "gitea.dev/models/git"
+	"gitea.dev/models/unit"
+	"gitea.dev/modules/templates"
+	"gitea.dev/services/context"
 )
 
 const (
-	tplActivity base.TplName = "repo/activity"
+	tplActivity templates.TplName = "repo/activity"
 )
 
 // Activity render the page to show repository latest changes
@@ -22,40 +23,51 @@ func Activity(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("repo.activity")
 	ctx.Data["PageIsActivity"] = true
 
-	ctx.Data["Period"] = ctx.Params("period")
+	ctx.Data["PageIsPulse"] = true
 
 	timeUntil := time.Now()
-	var timeFrom time.Time
-
-	switch ctx.Data["Period"] {
+	period, timeFrom := "weekly", timeUntil.Add(-time.Hour*168)
+	switch ctx.PathParam("period") {
 	case "daily":
-		timeFrom = timeUntil.Add(-time.Hour * 24)
+		period, timeFrom = "daily", timeUntil.Add(-time.Hour*24)
 	case "halfweekly":
-		timeFrom = timeUntil.Add(-time.Hour * 72)
+		period, timeFrom = "halfweekly", timeUntil.Add(-time.Hour*72)
 	case "weekly":
-		timeFrom = timeUntil.Add(-time.Hour * 168)
+		period, timeFrom = "weekly", timeUntil.Add(-time.Hour*168)
 	case "monthly":
-		timeFrom = timeUntil.AddDate(0, -1, 0)
+		period, timeFrom = "monthly", timeUntil.AddDate(0, -1, 0)
 	case "quarterly":
-		timeFrom = timeUntil.AddDate(0, -3, 0)
+		period, timeFrom = "quarterly", timeUntil.AddDate(0, -3, 0)
 	case "semiyearly":
-		timeFrom = timeUntil.AddDate(0, -6, 0)
+		period, timeFrom = "semiyearly", timeUntil.AddDate(0, -6, 0)
 	case "yearly":
-		timeFrom = timeUntil.AddDate(-1, 0, 0)
-	default:
-		ctx.Data["Period"] = "weekly"
-		timeFrom = timeUntil.Add(-time.Hour * 168)
+		period, timeFrom = "yearly", timeUntil.AddDate(-1, 0, 0)
 	}
-	ctx.Data["DateFrom"] = timeFrom.UTC().Format(time.RFC3339)
-	ctx.Data["DateUntil"] = timeUntil.UTC().Format(time.RFC3339)
-	ctx.Data["PeriodText"] = ctx.Tr("repo.activity.period." + ctx.Data["Period"].(string))
+	ctx.Data["DateFrom"] = timeFrom
+	ctx.Data["DateUntil"] = timeUntil
+	ctx.Data["Period"] = period
+	ctx.Data["PeriodText"] = ctx.Tr("repo.activity.period." + period)
+
+	canReadCode := ctx.Repo.Permission.CanRead(unit.TypeCode)
+	if canReadCode {
+		// GetActivityStats needs to read the default branch to get some information
+		branchExist, _ := git_model.IsBranchExist(ctx, ctx.Repo.Repository.ID, ctx.Repo.Repository.DefaultBranch)
+		if !branchExist {
+			ctx.Data["NotFoundPrompt"] = ctx.Tr("repo.branch.default_branch_not_exist", ctx.Repo.Repository.DefaultBranch)
+			ctx.NotFound(nil)
+			return
+		}
+	}
 
 	var err error
-	if ctx.Data["Activity"], err = activities_model.GetActivityStats(ctx, ctx.Repo.Repository, timeFrom,
-		ctx.Repo.CanRead(unit.TypeReleases),
-		ctx.Repo.CanRead(unit.TypeIssues),
-		ctx.Repo.CanRead(unit.TypePullRequests),
-		ctx.Repo.CanRead(unit.TypeCode)); err != nil {
+	// TODO: refactor these arguments to a struct
+	ctx.Data["Activity"], err = activities_model.GetActivityStats(ctx, ctx.Repo.Repository, timeFrom,
+		ctx.Repo.Permission.CanRead(unit.TypeReleases),
+		ctx.Repo.Permission.CanRead(unit.TypeIssues),
+		ctx.Repo.Permission.CanRead(unit.TypePullRequests),
+		canReadCode,
+	)
+	if err != nil {
 		ctx.ServerError("GetActivityStats", err)
 		return
 	}
@@ -73,7 +85,7 @@ func ActivityAuthors(ctx *context.Context) {
 	timeUntil := time.Now()
 	var timeFrom time.Time
 
-	switch ctx.Params("period") {
+	switch ctx.PathParam("period") {
 	case "daily":
 		timeFrom = timeUntil.Add(-time.Hour * 24)
 	case "halfweekly":
@@ -92,7 +104,6 @@ func ActivityAuthors(ctx *context.Context) {
 		timeFrom = timeUntil.Add(-time.Hour * 168)
 	}
 
-	var err error
 	authors, err := activities_model.GetActivityStatsTopAuthors(ctx, ctx.Repo.Repository, timeFrom, 10)
 	if err != nil {
 		ctx.ServerError("GetActivityStatsTopAuthors", err)

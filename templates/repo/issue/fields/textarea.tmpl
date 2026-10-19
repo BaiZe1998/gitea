@@ -1,5 +1,6 @@
-{{$useMarkdownEditor := not .item.Attributes.render}}
-<div class="field {{if $useMarkdownEditor}}combo-editor-dropzone{{end}}">
+{{$root := ctx.RootData -}}
+{{$useMarkdownEditor := not .item.Attributes.render -}}
+<div class="field {{if not .item.VisibleOnForm}}tw-hidden{{end}} {{if $useMarkdownEditor}}combo-editor-dropzone{{end}}">
 	{{template "repo/issue/fields/header" .}}
 
 	{{/* the real form element to provide the value */}}
@@ -7,17 +8,17 @@
 
 	{{if $useMarkdownEditor}}
 		{{template "shared/combomarkdowneditor" (dict
-			"ContainerClasses" "gt-hidden"
-			"MarkdownPreviewUrl" (print .root.RepoLink "/markup")
-			"MarkdownPreviewContext" .root.RepoLink
+			"CustomInit" true
+			"ContainerClasses" "tw-hidden"
+			"MarkdownEditorContext" (ctx.MiscUtils.MarkdownEditorComment $root.Repository)
 			"TextareaContent" .item.Attributes.value
-			"TextareaPlaceholder"  .item.Attributes.placeholder
+			"TextareaPlaceholder" .item.Attributes.placeholder
 			"DropzoneParentContainer" ".combo-editor-dropzone"
 		)}}
 
-		{{if .root.IsAttachmentEnabled}}
-		<div class="gt-mt-4 form-field-dropzone gt-hidden">
-			{{template "repo/upload" .root}}
+		{{if $root.IsAttachmentEnabled}}
+		<div class="tw-mt-4 form-field-dropzone tw-hidden">{{/*TODO: need to refactor the "repo/upload" template and remove this wrapper */}}
+			{{template "repo/upload" dict "UploadOptions" $root.UploadOptions}}
 		</div>
 		{{end}}
 	{{end}}

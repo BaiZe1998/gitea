@@ -9,24 +9,30 @@ import (
 	"html/template"
 	"strings"
 
-	"code.gitea.io/gitea/modules/highlight"
-	"code.gitea.io/gitea/modules/indexer/code/internal"
-	"code.gitea.io/gitea/modules/timeutil"
+	"gitea.dev/modules/highlight"
+	"gitea.dev/modules/indexer/code/internal"
+	"gitea.dev/modules/timeutil"
 )
 
 // Result a search result to display
 type Result struct {
-	RepoID         int64
-	Filename       string
-	CommitID       string
-	UpdatedUnix    timeutil.TimeStamp
-	Language       string
-	Color          string
-	LineNumbers    []int
-	FormattedLines template.HTML
+	RepoID      int64
+	Filename    string
+	CommitID    string
+	UpdatedUnix timeutil.TimeStamp
+	Language    string
+	Color       string
+	Lines       []*ResultLine
+}
+
+type ResultLine struct {
+	Num              int
+	FormattedContent template.HTML
 }
 
 type SearchResultLanguages = internal.SearchResultLanguages
+
+type SearchOptions = internal.SearchOptions
 
 func indices(content string, selectionStartIndex, selectionEndIndex int) (int, int) {
 	startIndex := selectionStartIndex
@@ -64,13 +70,30 @@ func writeStrings(buf *bytes.Buffer, strs ...string) error {
 	return nil
 }
 
+func HighlightSearchResultCode(filename, language string, lineNums []int, code string) []*ResultLine {
+	// we should highlight the whole code block first, otherwise it doesn't work well with multiple line highlighting
+	lexer := highlight.DetectChromaLexerByFileName(filename, language)
+	hl := highlight.RenderCodeByLexer(lexer, code)
+	highlightedLines := highlight.UnsafeSplitHighlightedLines(hl)
+
+	// The lineNums outputted by render might not match the original lineNums, because "highlight" removes the last `\n`
+	lines := make([]*ResultLine, min(len(highlightedLines), len(lineNums)))
+	for i := range lines {
+		lines[i] = &ResultLine{
+			Num:              lineNums[i],
+			FormattedContent: template.HTML(highlightedLines[i]),
+		}
+	}
+	return lines
+}
+
 func searchResult(result *internal.SearchResult, startIndex, endIndex int) (*Result, error) {
 	startLineNum := 1 + strings.Count(result.Content[:startIndex], "\n")
 
 	var formattedLinesBuffer bytes.Buffer
 
 	contentLines := strings.SplitAfter(result.Content[startIndex:endIndex], "\n")
-	lineNumbers := make([]int, len(contentLines))
+	lineNums := make([]int, 0, len(contentLines))
 	index := startIndex
 	for i, line := range contentLines {
 		var err error
@@ -85,39 +108,34 @@ func searchResult(result *internal.SearchResult, startIndex, endIndex int) (*Res
 				line[closeActiveIndex:],
 			)
 		} else {
-			err = writeStrings(&formattedLinesBuffer,
-				line,
-			)
+			err = writeStrings(&formattedLinesBuffer, line)
 		}
 		if err != nil {
 			return nil, err
 		}
 
-		lineNumbers[i] = startLineNum + i
+		lineNums = append(lineNums, startLineNum+i)
 		index += len(line)
 	}
 
-	highlighted, _ := highlight.Code(result.Filename, "", formattedLinesBuffer.String())
-
 	return &Result{
-		RepoID:         result.RepoID,
-		Filename:       result.Filename,
-		CommitID:       result.CommitID,
-		UpdatedUnix:    result.UpdatedUnix,
-		Language:       result.Language,
-		Color:          result.Color,
-		LineNumbers:    lineNumbers,
-		FormattedLines: highlighted,
+		RepoID:      result.RepoID,
+		Filename:    result.Filename,
+		CommitID:    result.CommitID,
+		UpdatedUnix: result.UpdatedUnix,
+		Language:    result.Language,
+		Color:       result.Color,
+		Lines:       HighlightSearchResultCode(result.Filename, result.Language, lineNums, formattedLinesBuffer.String()),
 	}, nil
 }
 
 // PerformSearch perform a search on a repository
-func PerformSearch(ctx context.Context, repoIDs []int64, language, keyword string, page, pageSize int, isMatch bool) (int, []*Result, []*internal.SearchResultLanguages, error) {
-	if len(keyword) == 0 {
+func PerformSearch(ctx context.Context, opts *SearchOptions) (int64, []*Result, []*SearchResultLanguages, error) {
+	if opts == nil || len(opts.Keyword) == 0 {
 		return 0, nil, nil, nil
 	}
 
-	total, results, resultLanguages, err := (*globalIndexer.Load()).Search(ctx, repoIDs, language, keyword, page, pageSize, isMatch)
+	total, results, resultLanguages, err := (*globalIndexer.Load()).Search(ctx, opts)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -131,5 +149,5 @@ func PerformSearch(ctx context.Context, repoIDs []int64, language, keyword strin
 			return 0, nil, nil, err
 		}
 	}
-	return int(total), displayResults, resultLanguages, nil
+	return total, displayResults, resultLanguages, nil
 }

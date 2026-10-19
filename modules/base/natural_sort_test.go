@@ -10,14 +10,41 @@ import (
 )
 
 func TestNaturalSortLess(t *testing.T) {
-	test := func(s1, s2 string, less bool) {
-		assert.Equal(t, less, NaturalSortLess(s1, s2))
+	testLess := func(s1, s2 string) {
+		assert.Negative(t, NaturalSortCompare(s1, s2), "s1<s2 should be true: s1=%q, s2=%q", s1, s2)
 	}
-	test("v1.20.0", "v1.2.0", false)
-	test("v1.20.0", "v1.29.0", true)
-	test("v1.20.0", "v1.20.0", false)
-	test("abc", "bcd", true)
-	test("a-1-a", "a-1-b", true)
-	test("2", "12", true)
-	test("a", "ab", true)
+	testEqual := func(s1, s2 string) {
+		assert.Zero(t, NaturalSortCompare(s1, s2), "s1<s2 should be false: s1=%q, s2=%q", s1, s2)
+	}
+
+	testEqual("", "")
+	testLess("", "a")
+	testLess("", "1")
+
+	testLess("v1.02.3", "v1.2.03")
+	testLess("1.01.0", "1.1.1")
+	testLess("v1.2", "v1.2.0")
+	testLess("v1.2.0", "v1.10.0")
+	testLess("v1.20.0", "v1.29.0")
+	testEqual("v1.20.0", "v1.20.0")
+
+	testLess("a", "A")
+	testLess("a", "B")
+	testLess("A", "b")
+	testLess("A", "ab")
+
+	testLess("abc", "bcd")
+	testLess("a-1-a", "a-1-b")
+	testLess("2", "12")
+
+	testLess("cafe", "café")
+	testLess("café", "caff")
+
+	testLess("A-2", "A-11")
+	testLess("0.txt", "1.txt")
+
+	testLess("file0001", "file2")
+	testLess("a08", "a8")
+	testLess("00", "1")
+	testLess("0", "00") // equal value, fewer leading zeros sorts first
 }

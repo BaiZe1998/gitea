@@ -4,6 +4,7 @@
 package util
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 )
@@ -11,8 +12,7 @@ import (
 // SliceContainsString sequential searches if string exists in slice.
 func SliceContainsString(slice []string, target string, insensitive ...bool) bool {
 	if len(insensitive) != 0 && insensitive[0] {
-		target = strings.ToLower(target)
-		return slices.ContainsFunc(slice, func(t string) bool { return strings.ToLower(t) == target })
+		return slices.ContainsFunc(slice, func(t string) bool { return strings.EqualFold(t, target) })
 	}
 
 	return slices.Contains(slice, target)
@@ -44,4 +44,36 @@ func SliceSortedEqual[T comparable](s1, s2 []T) bool {
 // SliceRemoveAll removes all the target elements from the slice.
 func SliceRemoveAll[T comparable](slice []T, target T) []T {
 	return slices.DeleteFunc(slice, func(t T) bool { return t == target })
+}
+
+// Sorted returns the sorted slice
+// Note: The parameter is sorted inline.
+func Sorted[S ~[]E, E cmp.Ordered](values S) S {
+	slices.Sort(values)
+	return values
+}
+
+// TODO: Replace with "maps.Values" once available, current it only in golang.org/x/exp/maps but not in standard library
+func ValuesOfMap[K comparable, V any](m map[K]V) []V {
+	values := make([]V, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
+}
+
+// TODO: Replace with "maps.Keys" once available, current it only in golang.org/x/exp/maps but not in standard library
+func KeysOfMap[K comparable, V any](m map[K]V) []K {
+	keys := make([]K, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func SliceNilAsEmpty[T any](a []T) []T {
+	if a == nil {
+		return []T{}
+	}
+	return a
 }

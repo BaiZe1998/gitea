@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/util"
 
 	"xorm.io/builder"
 )
@@ -19,12 +19,6 @@ type ErrExternalLoginUserAlreadyExist struct {
 	ExternalID    string
 	UserID        int64
 	LoginSourceID int64
-}
-
-// IsErrExternalLoginUserAlreadyExist checks if an error is a ExternalLoginUserAlreadyExist.
-func IsErrExternalLoginUserAlreadyExist(err error) bool {
-	_, ok := err.(ErrExternalLoginUserAlreadyExist)
-	return ok
 }
 
 func (err ErrExternalLoginUserAlreadyExist) Error() string {
@@ -39,12 +33,6 @@ func (err ErrExternalLoginUserAlreadyExist) Unwrap() error {
 type ErrExternalLoginUserNotExist struct {
 	UserID        int64
 	LoginSourceID int64
-}
-
-// IsErrExternalLoginUserNotExist checks if an error is a ExternalLoginUserNotExist.
-func IsErrExternalLoginUserNotExist(err error) bool {
-	_, ok := err.(ErrExternalLoginUserNotExist)
-	return ok
 }
 
 func (err ErrExternalLoginUserNotExist) Error() string {
@@ -92,8 +80,11 @@ func init() {
 }
 
 // GetExternalLogin checks if a externalID in loginSourceID scope already exists
-func GetExternalLogin(ctx context.Context, externalLoginUser *ExternalLoginUser) (bool, error) {
-	return db.GetEngine(ctx).Get(externalLoginUser)
+func GetExternalLogin(ctx context.Context, loginSourceID int64, externalID string) (*ExternalLoginUser, bool, error) {
+	return db.Get[ExternalLoginUser](ctx, builder.Eq{
+		"external_id":     externalID,
+		"login_source_id": loginSourceID,
+	})
 }
 
 // LinkExternalToUser link the external user to the user
@@ -130,6 +121,12 @@ func RemoveAllAccountLinks(ctx context.Context, user *User) error {
 	return err
 }
 
+// RemoveExternalLoginByExternalID removes a specific external login link by its provider-side identifier.
+func RemoveExternalLoginByExternalID(ctx context.Context, loginSourceID int64, externalID string) error {
+	_, err := db.GetEngine(ctx).Where("external_id=? AND login_source_id=?", externalID, loginSourceID).Delete(new(ExternalLoginUser))
+	return err
+}
+
 // GetUserIDByExternalUserID get user id according to provider and userID
 func GetUserIDByExternalUserID(ctx context.Context, provider, userID string) (int64, error) {
 	var id int64
@@ -160,12 +157,34 @@ func UpdateExternalUserByExternalID(ctx context.Context, external *ExternalLogin
 	return err
 }
 
+// EnsureLinkExternalToUser link the external user to the user
+func EnsureLinkExternalToUser(ctx context.Context, external *ExternalLoginUser) error {
+	has, err := db.Exist[ExternalLoginUser](ctx, builder.Eq{
+		"external_id":     external.ExternalID,
+		"login_source_id": external.LoginSourceID,
+	})
+	if err != nil {
+		return err
+	}
+
+	if has {
+		_, err = db.GetEngine(ctx).Where("external_id=? AND login_source_id=?", external.ExternalID, external.LoginSourceID).AllCols().Update(external)
+		return err
+	}
+
+	_, err = db.GetEngine(ctx).Insert(external)
+	return err
+}
+
 // FindExternalUserOptions represents an options to find external users
 type FindExternalUserOptions struct {
 	db.ListOptions
-	Provider string
-	UserID   int64
-	OrderBy  string
+	Provider        string
+	UserID          int64
+	LoginSourceID   int64
+	HasRefreshToken bool
+	Expired         bool
+	OrderBy         string
 }
 
 func (opts FindExternalUserOptions) ToConds() builder.Cond {
@@ -176,9 +195,18 @@ func (opts FindExternalUserOptions) ToConds() builder.Cond {
 	if opts.UserID > 0 {
 		cond = cond.And(builder.Eq{"user_id": opts.UserID})
 	}
+	if opts.Expired {
+		cond = cond.And(builder.Lt{"expires_at": time.Now()})
+	}
+	if opts.HasRefreshToken {
+		cond = cond.And(builder.Neq{"refresh_token": ""})
+	}
+	if opts.LoginSourceID != 0 {
+		cond = cond.And(builder.Eq{"login_source_id": opts.LoginSourceID})
+	}
 	return cond
 }
 
 func (opts FindExternalUserOptions) ToOrders() string {
-	return opts.OrderBy
+	return util.IfZero(opts.OrderBy, "external_id")
 }

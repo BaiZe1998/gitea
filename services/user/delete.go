@@ -8,26 +8,26 @@ import (
 	"fmt"
 	"time"
 
-	_ "image/jpeg" // Needed for jpeg support
+	actions_model "gitea.dev/models/actions"
+	activities_model "gitea.dev/models/activities"
+	asymkey_model "gitea.dev/models/asymkey"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/db"
+	git_model "gitea.dev/models/git"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/models/organization"
+	access_model "gitea.dev/models/perm/access"
+	pull_model "gitea.dev/models/pull"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
 
-	actions_model "code.gitea.io/gitea/models/actions"
-	activities_model "code.gitea.io/gitea/models/activities"
-	asymkey_model "code.gitea.io/gitea/models/asymkey"
-	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
-	git_model "code.gitea.io/gitea/models/git"
-	issues_model "code.gitea.io/gitea/models/issues"
-	"code.gitea.io/gitea/models/organization"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	pull_model "code.gitea.io/gitea/models/pull"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/setting"
+	_ "image/jpeg" // Needed for jpeg support
 
 	"xorm.io/builder"
 )
 
-// deleteUser deletes models associated to an user.
+// deleteUser deletes models associated to a user.
 func deleteUser(ctx context.Context, u *user_model.User, purge bool) (err error) {
 	e := db.GetEngine(ctx)
 
@@ -92,6 +92,14 @@ func deleteUser(ctx context.Context, u *user_model.User, purge bool) (err error)
 		&pull_model.ReviewState{UserID: u.ID},
 		&user_model.Redirect{RedirectUserID: u.ID},
 		&actions_model.ActionRunner{OwnerID: u.ID},
+		&user_model.Blocking{BlockerID: u.ID},
+		&user_model.Blocking{BlockeeID: u.ID},
+		&actions_model.ActionRunnerToken{OwnerID: u.ID},
+		&actions_model.ActionScopedWorkflowSource{OwnerID: u.ID},
+		&auth_model.TwoFactor{UID: u.ID},
+		&auth_model.WebAuthnCredential{UserID: u.ID},
+		&activities_model.Notification{UserID: u.ID},
+		&issues_model.IssueWatch{UserID: u.ID},
 	); err != nil {
 		return fmt.Errorf("deleteBeans: %w", err)
 	}
@@ -102,7 +110,6 @@ func deleteUser(ctx context.Context, u *user_model.User, purge bool) (err error)
 
 	if purge || (setting.Service.UserDeleteWithCommentsMaxTime != 0 &&
 		u.CreatedUnix.AsTime().Add(setting.Service.UserDeleteWithCommentsMaxTime).After(time.Now())) {
-
 		// Delete Comments
 		const batchSize = 50
 		for {
@@ -186,6 +193,10 @@ func deleteUser(ctx context.Context, u *user_model.User, purge bool) (err error)
 		return fmt.Errorf("ExternalLoginUser: %w", err)
 	}
 	// ***** END: ExternalLoginUser *****
+
+	if err := auth_model.DeleteAuthTokensByUserID(ctx, u.ID); err != nil {
+		return fmt.Errorf("DeleteAuthTokensByUserID: %w", err)
+	}
 
 	if _, err = db.DeleteByID[user_model.User](ctx, u.ID); err != nil {
 		return fmt.Errorf("delete: %w", err)

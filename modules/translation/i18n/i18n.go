@@ -4,26 +4,37 @@
 package i18n
 
 import (
+	"html/template"
 	"io"
 )
 
 var DefaultLocales = NewLocaleStore()
 
 type Locale interface {
-	// Tr translates a given key and arguments for a language
-	Tr(trKey string, trArgs ...any) string
-	// Has reports if a locale has a translation for a given key
-	Has(trKey string) bool
+	// TrString translates a given key and arguments for a language
+	TrString(trKey string, trArgs ...any) string
+	// TrHTML translates a given key and arguments for a language, string arguments are escaped to HTML
+	TrHTML(trKey string, trArgs ...any) template.HTML
+	// HasKey reports if a locale has a translation for a given key
+	HasKey(trKey string) bool
+}
+
+// LocaleTranslation represents an interface to translation
+type LocaleTranslation interface {
+	Language() string
+	HasKey(trKey string) bool
+	TrString(string, ...any) string
+
+	Tr(key string, args ...any) template.HTML
+	TrN(cnt any, key1, keyN string, args ...any) template.HTML
+
+	PrettyNumber(v any) string
 }
 
 // LocaleStore provides the functions common to all locale stores
 type LocaleStore interface {
 	io.Closer
 
-	// Tr translates a given key and arguments for a language
-	Tr(lang, trKey string, trArgs ...any) string
-	// Has reports if a locale has a translation for a given key
-	Has(lang, trKey string) bool
 	// SetDefaultLang sets the default language to fall back to
 	SetDefaultLang(lang string)
 	// ListLangNameDesc provides paired slices of language names to descriptors
@@ -32,8 +43,8 @@ type LocaleStore interface {
 	Locale(langName string) (Locale, bool)
 	// HasLang returns whether a given language is present in the store
 	HasLang(langName string) bool
-	// AddLocaleByIni adds a new language to the store
-	AddLocaleByIni(langName, langDesc string, source, moreSource []byte) error
+	// AddLocaleByJSON adds a new language to the store
+	AddLocaleByJSON(langName, langDesc string, source, moreSource []byte) error
 }
 
 // ResetDefaultLocales resets the current default locales
@@ -45,7 +56,7 @@ func ResetDefaultLocales() {
 	DefaultLocales = NewLocaleStore()
 }
 
-// GetLocales returns the locale from the default locales
+// GetLocale returns the locale from the default locales
 func GetLocale(lang string) (Locale, bool) {
 	return DefaultLocales.Locale(lang)
 }

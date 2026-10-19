@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"io"
 
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/typesniffer"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/services/forms"
-	repo_service "code.gitea.io/gitea/services/repository"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/typesniffer"
+	"gitea.dev/modules/web"
+	"gitea.dev/services/context"
+	"gitea.dev/services/forms"
+	repo_service "gitea.dev/services/repository"
 )
 
 // UpdateAvatarSetting update repo's avatar
@@ -38,7 +38,7 @@ func UpdateAvatarSetting(ctx *context.Context, form forms.AvatarForm) error {
 	defer r.Close()
 
 	if form.Avatar.Size > setting.Avatar.MaxFileSize {
-		return errors.New(ctx.Tr("settings.uploaded_avatar_is_too_big", form.Avatar.Size/1024, setting.Avatar.MaxFileSize/1024))
+		return errors.New(ctx.Locale.TrString("settings.uploaded_avatar_is_too_big", form.Avatar.Size/1024, setting.Avatar.MaxFileSize/1024))
 	}
 
 	data, err := io.ReadAll(r)
@@ -47,7 +47,7 @@ func UpdateAvatarSetting(ctx *context.Context, form forms.AvatarForm) error {
 	}
 	st := typesniffer.DetectContentType(data)
 	if !(st.IsImage() && !st.IsSvgImage()) {
-		return errors.New(ctx.Tr("settings.uploaded_avatar_not_a_image"))
+		return errors.New(ctx.Locale.TrString("settings.uploaded_avatar_not_a_image"))
 	}
 	if err = repo_service.UploadAvatar(ctx, ctxRepo, data); err != nil {
 		return fmt.Errorf("UploadAvatar: %w", err)
@@ -57,8 +57,7 @@ func UpdateAvatarSetting(ctx *context.Context, form forms.AvatarForm) error {
 
 // SettingsAvatar save new POSTed repository avatar
 func SettingsAvatar(ctx *context.Context) {
-	form := web.GetForm(ctx).(*forms.AvatarForm)
-	form.Source = forms.AvatarLocal
+	form := web.GetForm[*forms.AvatarForm](ctx)
 	if err := UpdateAvatarSetting(ctx, *form); err != nil {
 		ctx.Flash.Error(err.Error())
 	} else {

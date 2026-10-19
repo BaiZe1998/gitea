@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"testing"
 
-	auth_model "code.gitea.io/gitea/models/auth"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/tests"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/tests"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -30,9 +32,15 @@ func TestAPIFollow(t *testing.T) {
 	t.Run("Follow", func(t *testing.T) {
 		defer tests.PrintCurrentTest(t)()
 
-		req := NewRequest(t, "PUT", fmt.Sprintf("/api/v1/user/following/%s", user1)).
+		req := NewRequest(t, "PUT", "/api/v1/user/following/"+user1).
 			AddTokenAuth(token2)
 		MakeRequest(t, req, http.StatusNoContent)
+
+		// blocked user can't follow blocker
+		user34 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 34})
+		req = NewRequest(t, "PUT", "/api/v1/user/following/user2").
+			AddTokenAuth(getUserToken(t, user34.Name, auth_model.AccessTokenScopeWriteUser))
+		MakeRequest(t, req, http.StatusForbidden)
 	})
 
 	t.Run("ListFollowing", func(t *testing.T) {
@@ -42,8 +50,7 @@ func TestAPIFollow(t *testing.T) {
 			AddTokenAuth(token2)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var users []api.User
-		DecodeJSON(t, resp, &users)
+		users := DecodeJSON(t, resp, []api.User{})
 		assert.Len(t, users, 1)
 		assert.Equal(t, user1, users[0].UserName)
 	})
@@ -55,8 +62,7 @@ func TestAPIFollow(t *testing.T) {
 			AddTokenAuth(token2)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var users []api.User
-		DecodeJSON(t, resp, &users)
+		users := DecodeJSON(t, resp, []api.User{})
 		assert.Len(t, users, 1)
 		assert.Equal(t, user1, users[0].UserName)
 	})
@@ -68,8 +74,7 @@ func TestAPIFollow(t *testing.T) {
 			AddTokenAuth(token1)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var users []api.User
-		DecodeJSON(t, resp, &users)
+		users := DecodeJSON(t, resp, []api.User{})
 		assert.Len(t, users, 1)
 		assert.Equal(t, user2, users[0].UserName)
 	})
@@ -81,8 +86,7 @@ func TestAPIFollow(t *testing.T) {
 			AddTokenAuth(token1)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var users []api.User
-		DecodeJSON(t, resp, &users)
+		users := DecodeJSON(t, resp, []api.User{})
 		assert.Len(t, users, 1)
 		assert.Equal(t, user2, users[0].UserName)
 	})
@@ -102,11 +106,11 @@ func TestAPIFollow(t *testing.T) {
 	t.Run("CheckMyFollowing", func(t *testing.T) {
 		defer tests.PrintCurrentTest(t)()
 
-		req := NewRequest(t, "GET", fmt.Sprintf("/api/v1/user/following/%s", user1)).
+		req := NewRequest(t, "GET", "/api/v1/user/following/"+user1).
 			AddTokenAuth(token2)
 		MakeRequest(t, req, http.StatusNoContent)
 
-		req = NewRequest(t, "GET", fmt.Sprintf("/api/v1/user/following/%s", user2)).
+		req = NewRequest(t, "GET", "/api/v1/user/following/"+user2).
 			AddTokenAuth(token1)
 		MakeRequest(t, req, http.StatusNotFound)
 	})
@@ -114,7 +118,7 @@ func TestAPIFollow(t *testing.T) {
 	t.Run("Unfollow", func(t *testing.T) {
 		defer tests.PrintCurrentTest(t)()
 
-		req := NewRequest(t, "DELETE", fmt.Sprintf("/api/v1/user/following/%s", user1)).
+		req := NewRequest(t, "DELETE", "/api/v1/user/following/"+user1).
 			AddTokenAuth(token2)
 		MakeRequest(t, req, http.StatusNoContent)
 	})

@@ -9,13 +9,14 @@ import (
 	"image/png"
 	"io"
 	"net/url"
-	"strings"
+	"strconv"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/avatar"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/storage"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/avatar"
+	"gitea.dev/modules/httplib"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/storage"
 )
 
 // CustomAvatarRelativePath returns repository custom avatar file path.
@@ -37,23 +38,17 @@ func (repo *Repository) RelAvatarLink(ctx context.Context) string {
 
 // generateRandomAvatar generates a random avatar for repository.
 func generateRandomAvatar(ctx context.Context, repo *Repository) error {
-	idToString := fmt.Sprintf("%d", repo.ID)
+	idToString := strconv.FormatInt(repo.ID, 10)
 
 	seed := idToString
-	img, err := avatar.RandomImage([]byte(seed))
-	if err != nil {
-		return fmt.Errorf("RandomImage: %w", err)
-	}
+	img := avatar.RandomImageDefaultSize([]byte(seed))
 
 	repo.Avatar = idToString
 
 	if err := storage.SaveFrom(storage.RepoAvatars, repo.CustomAvatarRelativePath(), func(w io.Writer) error {
-		if err := png.Encode(w, img); err != nil {
-			log.Error("Encode: %v", err)
-		}
-		return err
+		return png.Encode(w, img)
 	}); err != nil {
-		return fmt.Errorf("Failed to create dir %s: %w", repo.CustomAvatarRelativePath(), err)
+		return fmt.Errorf("failed to create dir %s: %w", repo.CustomAvatarRelativePath(), err)
 	}
 
 	log.Info("New random avatar created for repository: %d", repo.ID)
@@ -84,13 +79,13 @@ func (repo *Repository) relAvatarLink(ctx context.Context) string {
 	return setting.AppSubURL + "/repo-avatars/" + url.PathEscape(repo.Avatar)
 }
 
-// AvatarLink returns a link to the repository's avatar.
+// AvatarLink returns the full avatar url with http host or the empty string if the repo doesn't have an avatar.
+//
+// TODO: refactor it to a relative URL, but it is still used in API response at the moment
 func (repo *Repository) AvatarLink(ctx context.Context) string {
-	link := repo.relAvatarLink(ctx)
-	// we only prepend our AppURL to our known (relative, internal) avatar link to get an absolute URL
-	if strings.HasPrefix(link, "/") && !strings.HasPrefix(link, "//") {
-		return setting.AppURL + strings.TrimPrefix(link, setting.AppSubURL)[1:]
+	relLink := repo.relAvatarLink(ctx)
+	if relLink != "" {
+		return httplib.MakeAbsoluteURL(ctx, relLink)
 	}
-	// otherwise, return the link as it is
-	return link
+	return ""
 }

@@ -6,8 +6,8 @@ package organization
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/db"
-	user_model "code.gitea.io/gitea/models/user"
+	"gitea.dev/models/db"
+	user_model "gitea.dev/models/user"
 
 	"xorm.io/builder"
 )
@@ -30,26 +30,10 @@ func IsTeamMember(ctx context.Context, orgID, teamID, userID int64) (bool, error
 		Exist()
 }
 
-// GetTeamUsersByTeamID returns team users for a team
-func GetTeamUsersByTeamID(ctx context.Context, teamID int64) ([]*TeamUser, error) {
-	teamUsers := make([]*TeamUser, 0, 10)
-	return teamUsers, db.GetEngine(ctx).
-		Where("team_id=?", teamID).
-		Find(&teamUsers)
-}
-
 // SearchMembersOptions holds the search options
 type SearchMembersOptions struct {
 	db.ListOptions
 	TeamID int64
-}
-
-func (opts SearchMembersOptions) ToConds() builder.Cond {
-	cond := builder.NewCond()
-	if opts.TeamID > 0 {
-		cond = cond.And(builder.Eq{"": opts.TeamID})
-	}
-	return cond
 }
 
 // GetTeamMembers returns all members in given team of organization.

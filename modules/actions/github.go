@@ -4,7 +4,7 @@
 package actions
 
 import (
-	webhook_module "code.gitea.io/gitea/modules/webhook"
+	webhook_module "gitea.dev/modules/webhook"
 )
 
 const (
@@ -24,6 +24,49 @@ const (
 	GithubEventGollum                   = "gollum"
 	GithubEventSchedule                 = "schedule"
 )
+
+// IsDefaultBranchWorkflow returns true if the event only triggers workflows on the default branch
+func IsDefaultBranchWorkflow(triggedEvent webhook_module.HookEventType) bool {
+	switch triggedEvent {
+	case webhook_module.HookEventDelete:
+		// GitHub "delete" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#delete
+		return true
+	case webhook_module.HookEventFork:
+		// GitHub "fork" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#fork
+		return true
+	case webhook_module.HookEventIssueComment:
+		// GitHub "issue_comment" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#issue_comment
+		return true
+	case webhook_module.HookEventPullRequestComment:
+		// GitHub "pull_request_comment" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request_comment-use-issue_comment
+		return true
+	case webhook_module.HookEventWiki:
+		// GitHub "gollum" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#gollum
+		return true
+	case webhook_module.HookEventSchedule:
+		// GitHub "schedule" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule
+		return true
+	case webhook_module.HookEventIssues,
+		webhook_module.HookEventIssueAssign,
+		webhook_module.HookEventIssueLabel,
+		webhook_module.HookEventIssueMilestone:
+		// Github "issues" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#issues
+		return true
+	case webhook_module.HookEventWorkflowRun:
+		// GitHub "workflow_run" event
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_run
+		return true
+	}
+
+	return false
+}
 
 // canGithubEventMatch check if the input Github event can match any Gitea event.
 func canGithubEventMatch(eventName string, triggedEvent webhook_module.HookEventType) bool {
@@ -52,7 +95,9 @@ func canGithubEventMatch(eventName string, triggedEvent webhook_module.HookEvent
 		case webhook_module.HookEventPullRequest,
 			webhook_module.HookEventPullRequestSync,
 			webhook_module.HookEventPullRequestAssign,
-			webhook_module.HookEventPullRequestLabel:
+			webhook_module.HookEventPullRequestLabel,
+			webhook_module.HookEventPullRequestReviewRequest,
+			webhook_module.HookEventPullRequestMilestone:
 			return true
 
 		default:
@@ -72,6 +117,11 @@ func canGithubEventMatch(eventName string, triggedEvent webhook_module.HookEvent
 
 	case GithubEventSchedule:
 		return triggedEvent == webhook_module.HookEventSchedule
+
+	case GithubEventIssueComment:
+		// https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request_comment-use-issue_comment
+		return triggedEvent == webhook_module.HookEventIssueComment ||
+			triggedEvent == webhook_module.HookEventPullRequestComment
 
 	default:
 		return eventName == string(triggedEvent)

@@ -1,18 +1,11 @@
 <div class="issue-content">
-	<!-- I know, there is probably a better way to do this (moved from sidebar.tmpl, original author: 6543 @ 2021-02-28) -->
-	<!-- Agree, there should be a better way, eg: introduce window.config.pageData (original author: wxiaoguang @ 2021-09-05) -->
-	<input type="hidden" id="repolink" value="{{$.RepoRelPath}}">
-	<input type="hidden" id="repoId" value="{{.Repository.ID}}">
-	<input type="hidden" id="issueIndex" value="{{.Issue.Index}}">
-	<input type="hidden" id="type" value="{{.IssueType}}">
-
-	{{$createdStr:= TimeSinceUnix .Issue.CreatedUnix ctx.Locale}}
-	<div class="issue-content-left comment-list prevent-before-timeline">
-		<div class="ui timeline">
-			<div id="{{.Issue.HashTag}}" class="timeline-item comment first">
+	{{$createdStr:= DateUtils.TimeSince .Issue.CreatedUnix}}
+	<div class="issue-content-left">
+		<div class="comment-list">
+			<div id="{{.Issue.HashTag}}" class="timeline-item comment issue-content-comment">
 				{{if .Issue.OriginalAuthor}}
 				<span class="timeline-avatar">
-					<img src="{{AppSubUrl}}/assets/img/avatar_default.png" width="40" height="40">
+					{{ctx.AvatarUtils.Avatar nil 40}}
 				</span>
 				{{else}}
 				<a class="timeline-avatar" {{if gt .Issue.Poster.ID 0}}href="{{.Issue.Poster.HomeLink}}"{{end}}>
@@ -20,62 +13,63 @@
 				</a>
 				{{end}}
 				<div class="content comment-container">
-					<div class="ui top attached header comment-header gt-df gt-ac gt-sb" role="heading" aria-level="3">
-						<div class="comment-header-left gt-df gt-ac">
+					<div class="comment-header avatar-content-left-arrow" role="heading" aria-level="3">
+						<div class="comment-header-left">
 							{{if .Issue.OriginalAuthor}}
-								<span class="text black gt-font-semibold">
+								<span class="tw-text-text tw-font-semibold">
 									{{svg (MigrationIcon .Repository.GetOriginalURLHostname)}}
 									{{.Issue.OriginalAuthor}}
 								</span>
-								<span class="text grey muted-links">
-									{{ctx.Locale.Tr "repo.issues.commented_at" (.Issue.HashTag|Escape) $createdStr | Safe}}
+								<span class="tw-text-text-light muted-links">
+									{{ctx.Locale.Tr "repo.issues.commented_at" .Issue.HashTag $createdStr}}
 								</span>
 								<span class="text migrate">
-									{{if .Repository.OriginalURL}} ({{ctx.Locale.Tr "repo.migrated_from" (.Repository.OriginalURL|Escape) (.Repository.GetOriginalURLHostname|Escape) | Safe}}){{end}}
+									{{if .Repository.OriginalURL}} ({{ctx.Locale.Tr "repo.migrated_from" .Repository.OriginalURL .Repository.GetOriginalURLHostname}}){{end}}
 								</span>
 							{{else}}
 								<a class="inline-timeline-avatar" href="{{.Issue.Poster.HomeLink}}">
 									{{ctx.AvatarUtils.Avatar .Issue.Poster 24}}
 								</a>
-								<span class="text grey muted-links">
+								<span class="tw-text-text-light muted-links">
 									{{template "shared/user/authorlink" .Issue.Poster}}
-									{{ctx.Locale.Tr "repo.issues.commented_at" (.Issue.HashTag|Escape) $createdStr | Safe}}
+									{{ctx.Locale.Tr "repo.issues.commented_at" .Issue.HashTag $createdStr}}
 								</span>
 							{{end}}
 						</div>
-						<div class="comment-header-right actions gt-df gt-ac">
+						<div class="comment-header-right">
 							{{template "repo/issue/view_content/show_role" dict "ShowRole" .Issue.ShowRole "IgnorePoster" true}}
 							{{if not $.Repository.IsArchived}}
-								{{template "repo/issue/view_content/add_reaction" dict "ctxData" $ "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
+								{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
 							{{end}}
-							{{template "repo/issue/view_content/context_menu" dict "ctxData" $ "item" .Issue "delete" false "issue" true "diff" false "IsCommentPoster" $.IsIssuePoster}}
+							{{template "repo/issue/view_content/context_menu" dict "ConvContentType" "issue_main" "ConvContentItem" .Issue}}
 						</div>
 					</div>
 					<div class="ui attached segment comment-body" role="article">
 						<div class="render-content markup" {{if or $.Permission.IsAdmin $.HasIssuesOrPullsWritePermission $.IsIssuePoster}}data-can-edit="true"{{end}}>
 							{{if .Issue.RenderedContent}}
-								{{.Issue.RenderedContent|Str2html}}
+								{{.Issue.RenderedContent}}
 							{{else}}
 								<span class="no-content">{{ctx.Locale.Tr "repo.issues.no_content"}}</span>
 							{{end}}
 						</div>
-						<div id="issue-{{.Issue.ID}}-raw" class="raw-content gt-hidden">{{.Issue.Content}}</div>
-						<div class="edit-content-zone gt-hidden" data-update-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/content" data-context="{{.RepoLink}}" data-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/attachments" data-view-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/view-attachments"></div>
+						<div id="{{.Issue.HashTag}}-raw" class="raw-content tw-hidden">{{.Issue.Content}}</div>
+						<div class="edit-content-zone tw-hidden" data-update-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/content" data-content-version="{{.Issue.ContentVersion}}" data-context="{{.RepoLink}}" data-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/attachments" data-view-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/view-attachments"></div>
 						{{if .Issue.Attachments}}
-							{{template "repo/issue/view_content/attachments" dict "ctxData" $ "Attachments" .Issue.Attachments "Content" .Issue.RenderedContent}}
+							{{template "repo/issue/view_content/attachments" dict "Attachments" .Issue.Attachments "RenderedContent" .Issue.RenderedContent}}
 						{{end}}
 					</div>
 					{{$reactions := .Issue.Reactions.GroupByType}}
 					{{if $reactions}}
-						{{template "repo/issue/view_content/reactions" dict "ctxData" $ "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
+						{{template "repo/issue/view_content/reactions" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
 					{{end}}
 				</div>
 			</div>
 
 			{{template "repo/issue/view_content/comments" .}}
+			<div class="timeline-item tw-hidden" id="timeline-comments-end"></div>
 
 			{{if and .Issue.IsPull (not $.Repository.IsArchived)}}
-				{{template "repo/issue/view_content/pull".}}
+				{{template "repo/issue/view_content/pull_merge_box".}}
 			{{end}}
 
 			{{if .IsSigned}}
@@ -85,36 +79,42 @@
 						{{ctx.AvatarUtils.Avatar .SignedUser 40}}
 					</a>
 					<div class="content">
-						<form class="ui segment form form-fetch-action" id="comment-form" action="{{$.RepoLink}}/issues/{{.Issue.Index}}/comments" method="post">
-							{{template "repo/issue/comment_tab" .}}
-							{{.CsrfTokenHtml}}
-							<div class="field footer">
-								<div class="text right">
-									{{if and (or .HasIssuesOrPullsWritePermission .IsIssuePoster) (not .DisableStatusChange)}}
-										{{if .Issue.IsClosed}}
-											<button id="status-button" class="ui primary basic button" data-status="{{ctx.Locale.Tr "repo.issues.reopen_issue"}}" data-status-and-comment="{{ctx.Locale.Tr "repo.issues.reopen_comment_issue"}}" name="status" value="reopen">
-												{{ctx.Locale.Tr "repo.issues.reopen_issue"}}
-											</button>
-										{{else}}
-											{{$closeTranslationKey := "repo.issues.close"}}
-											{{if .Issue.IsPull}}
-												{{$closeTranslationKey = "repo.pulls.close"}}
+						<div class="ui segment avatar-content-left-arrow">
+							<form class="ui form form-fetch-action" id="comment-form" action="{{$.RepoLink}}/issues/{{.Issue.Index}}/comments" method="post">
+								{{template "repo/issue/comment_tab" .}}
+								<div class="field footer">
+									<div class="flex-text-block tw-justify-end">
+										{{if and (or .HasIssuesOrPullsWritePermission .IsIssuePoster) (not .DisableStatusChange)}}
+											{{$btnIconColor := ""}}{{$btnIcon := ""}}{{$btnTextNoComment := ""}}{{$btnTextWithComment := ""}}{{$btnValue := ""}}
+											{{if .Issue.IsClosed}}
+												{{$btnValue = "reopen"}}
+												{{$btnIconColor = "tw-text-green"}}
+												{{$btnIcon = Iif .Issue.IsPull "octicon-git-pull-request" "octicon-issue-reopened"}}
+												{{$btnTextNoComment = ctx.Locale.Tr (Iif .Issue.IsPull "repo.pulls.reopen" "repo.issues.reopen_issue")}}
+												{{$btnTextWithComment = ctx.Locale.Tr "repo.issues.reopen_comment_issue"}}{{/* general: Reopen with Comment */}}
+											{{else}}
+												{{$btnValue = "close"}}
+												{{$btnIconColor = "tw-text-red"}}
+												{{$btnIcon = Iif .Issue.IsPull "octicon-git-pull-request-closed" "octicon-issue-closed"}}
+												{{$btnTextNoComment = ctx.Locale.Tr (Iif .Issue.IsPull "repo.pulls.close" "repo.issues.close")}}
+												{{$btnTextWithComment = ctx.Locale.Tr "repo.issues.close_comment_issue"}}{{/* general: Close with Comment */}}
 											{{end}}
-											<button id="status-button" class="ui red basic button" data-status="{{ctx.Locale.Tr $closeTranslationKey}}" data-status-and-comment="{{ctx.Locale.Tr "repo.issues.close_comment_issue"}}" name="status" value="close">
-												{{ctx.Locale.Tr $closeTranslationKey}}
+											<button type="submit" id="status-button" class="ui button" data-status="{{$btnTextNoComment}}" data-status-and-comment="{{$btnTextWithComment}}" name="status" value="{{$btnValue}}">
+												<span class="status-button-icon {{$btnIconColor}}">{{svg $btnIcon}}</span>
+												<span class="status-button-text">{{$btnTextNoComment}}</span>
 											</button>
 										{{end}}
-									{{end}}
-									<button class="ui primary button">
-										{{ctx.Locale.Tr "repo.issues.create_comment"}}
-									</button>
+										<button type="submit" id="comment-button" class="ui primary button">
+											{{ctx.Locale.Tr "repo.issues.create_comment"}}
+										</button>
+									</div>
 								</div>
-							</div>
-						</form>
+							</form>
+						</div>
 					</div>
 				</div>
 				{{else if .Repository.IsArchived}}
-					<div class="ui warning message gt-text-center">
+					<div class="ui warning message tw-text-center">
 						{{if .Issue.IsPull}}
 							{{ctx.Locale.Tr "repo.archive.pull.nocomment"}}
 						{{else}}
@@ -124,7 +124,7 @@
 				{{end}}
 			{{else}} {{/* not .IsSigned */}}
 				{{if .Repository.IsArchived}}
-					<div class="ui warning message gt-text-center">
+					<div class="ui warning message tw-text-center">
 						{{if .Issue.IsPull}}
 							{{ctx.Locale.Tr "repo.archive.pull.nocomment"}}
 						{{else}}
@@ -133,7 +133,7 @@
 					</div>
 				{{else}}
 					<div class="ui warning message">
-						{{ctx.Locale.Tr "repo.issues.sign_in_require_desc" (.SignInLink|Escape) | Safe}}
+						{{ctx.Locale.Tr "repo.issues.sign_in_require_desc" .SignInLink}}
 					</div>
 				{{end}}
 			{{end}}{{/* end if: .IsSigned */}}
@@ -144,11 +144,11 @@
 </div>
 
 <template id="issue-comment-editor-template">
-	<div class="ui comment form">
+	<form class="ui form comment">
 		<div class="field">
 			{{template "shared/combomarkdowneditor" (dict
-				"MarkdownPreviewUrl" (print .Repository.Link "/markup")
-				"MarkdownPreviewContext" .RepoLink
+				"CustomInit" true
+				"MarkdownEditorContext" (ctx.MiscUtils.MarkdownEditorComment $.Repository)
 				"TextareaName" "content"
 				"DropzoneParentContainer" ".ui.form"
 			)}}
@@ -156,32 +156,18 @@
 
 		{{if .IsAttachmentEnabled}}
 			<div class="field">
-				{{template "repo/upload" .}}
+				{{template "repo/upload" dict "UploadOptions" $.UploadOptions}}
 			</div>
 		{{end}}
 
 		<div class="field">
-			<div class="text right edit">
-				<button class="ui basic cancel button">{{ctx.Locale.Tr "repo.issues.cancel"}}</button>
-				<button class="ui primary save button">{{ctx.Locale.Tr "repo.issues.save"}}</button>
+			<div class="flex-text-block tw-justify-end">
+				<button type="button" class="ui cancel button">{{ctx.Locale.Tr "repo.issues.cancel"}}</button>
+				<button type="submit" class="ui primary button">{{ctx.Locale.Tr "repo.issues.save"}}</button>
 			</div>
 		</div>
-	</div>
+	</form>
 </template>
 
 {{template "repo/issue/view_content/reference_issue_dialog" .}}
-
-<div class="gt-hidden" id="no-content">
-	<span class="no-content">{{ctx.Locale.Tr "repo.issues.no_content"}}</span>
-</div>
-
-<div class="ui g-modal-confirm delete modal">
-	<div class="header">
-		{{svg "octicon-trash"}}
-		{{ctx.Locale.Tr "repo.branch.delete" .HeadTarget}}
-	</div>
-	<div class="content">
-		<p>{{ctx.Locale.Tr "repo.branch.delete_desc" | Str2html}}</p>
-	</div>
-	{{template "base/modal_actions_confirm" .}}
-</div>
+{{template "shared/user/block_user_dialog" .}}

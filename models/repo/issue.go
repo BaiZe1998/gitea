@@ -6,9 +6,9 @@ package repo
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/models/unit"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
 // ___________.__             ___________                     __
@@ -53,7 +53,7 @@ func (repo *Repository) IsDependenciesEnabled(ctx context.Context) bool {
 	var u *RepoUnit
 	var err error
 	if u, err = repo.GetUnit(ctx, unit.TypeIssues); err != nil {
-		log.Trace("%s", err)
+		log.Trace("IsDependenciesEnabled: %v", err)
 		return setting.Service.DefaultEnableDependencies
 	}
 	return u.IssuesConfig().EnableDependencies

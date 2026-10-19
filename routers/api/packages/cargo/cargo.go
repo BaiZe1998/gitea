@@ -10,19 +10,20 @@ import (
 	"strconv"
 	"strings"
 
-	"code.gitea.io/gitea/models/db"
-	packages_model "code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/log"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	cargo_module "code.gitea.io/gitea/modules/packages/cargo"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	"code.gitea.io/gitea/services/convert"
-	packages_service "code.gitea.io/gitea/services/packages"
-	cargo_service "code.gitea.io/gitea/services/packages/cargo"
+	"gitea.dev/models/db"
+	packages_model "gitea.dev/models/packages"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	packages_module "gitea.dev/modules/packages"
+	cargo_module "gitea.dev/modules/packages/cargo"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	packages_service "gitea.dev/services/packages"
+	cargo_service "gitea.dev/services/packages/cargo"
 )
 
 // https://doc.rust-lang.org/cargo/reference/registries.html#web-api
@@ -36,25 +37,24 @@ type StatusMessage struct {
 }
 
 func apiError(ctx *context.Context, status int, obj any) {
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		ctx.JSON(status, StatusResponse{
-			OK: false,
-			Errors: []StatusMessage{
-				{
-					Message: message,
-				},
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	ctx.JSON(status, StatusResponse{
+		OK: false,
+		Errors: []StatusMessage{
+			{
+				Message: message,
 			},
-		})
+		},
 	})
 }
 
 // https://rust-lang.github.io/rfcs/2789-sparse-index.html
 func RepositoryConfig(ctx *context.Context) {
-	ctx.JSON(http.StatusOK, cargo_service.BuildConfig(ctx.Package.Owner, setting.Service.RequireSignInView || ctx.Package.Owner.Visibility != structs.VisibleTypePublic))
+	ctx.JSON(http.StatusOK, cargo_service.BuildConfig(ctx.Package.Owner, setting.Service.RequireSignInViewStrict || ctx.Package.Owner.Visibility != structs.VisibleTypePublic))
 }
 
 func EnumeratePackageVersions(ctx *context.Context) {
-	p, err := packages_model.GetPackageByName(ctx, ctx.Package.Owner.ID, packages_model.TypeCargo, ctx.Params("package"))
+	p, err := packages_model.GetPackageByName(ctx, ctx.Package.Owner.ID, packages_model.TypeCargo, ctx.PathParam("package"))
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
@@ -94,10 +94,7 @@ type SearchResultMeta struct {
 
 // https://doc.rust-lang.org/cargo/reference/registries.html#search
 func SearchPackages(ctx *context.Context) {
-	page := ctx.FormInt("page")
-	if page < 1 {
-		page = 1
-	}
+	page := max(ctx.FormInt("page"), 1)
 	perPage := ctx.FormInt("per_page")
 	paginator := db.ListOptions{
 		Page:     page,
@@ -110,7 +107,7 @@ func SearchPackages(ctx *context.Context) {
 			OwnerID:    ctx.Package.Owner.ID,
 			Type:       packages_model.TypeCargo,
 			Name:       packages_model.SearchValue{Value: ctx.FormTrim("q")},
-			IsInternal: util.OptionalBoolFalse,
+			IsInternal: optional.Some(false),
 			Paginator:  &paginator,
 		},
 	)
@@ -130,7 +127,7 @@ func SearchPackages(ctx *context.Context) {
 		crates = append(crates, &SearchResultCrate{
 			Name:          pd.Package.Name,
 			LatestVersion: pd.Version.Version,
-			Description:   pd.Metadata.(*cargo_module.Metadata).Description,
+			Description:   packages_model.DescriptorMetadata[*cargo_module.Metadata](pd).Description,
 		})
 	}
 
@@ -167,24 +164,21 @@ func ListOwners(ctx *context.Context) {
 
 // DownloadPackageFile serves the content of a package
 func DownloadPackageFile(ctx *context.Context) {
-	s, u, pf, err := packages_service.GetFileStreamByPackageNameAndVersion(
+	s, u, pf, err := packages_service.OpenFileForDownloadByPackageNameAndVersion(
 		ctx,
 		&packages_service.PackageInfo{
 			Owner:       ctx.Package.Owner,
 			PackageType: packages_model.TypeCargo,
-			Name:        ctx.Params("package"),
-			Version:     ctx.Params("version"),
+			Name:        ctx.PathParam("package"),
+			Version:     ctx.PathParam("version"),
 		},
 		&packages_service.PackageFileInfo{
-			Filename: strings.ToLower(fmt.Sprintf("%s-%s.crate", ctx.Params("package"), ctx.Params("version"))),
+			Filename: strings.ToLower(fmt.Sprintf("%s-%s.crate", ctx.PathParam("package"), ctx.PathParam("version"))),
 		},
+		ctx.Req.Method,
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist || err == packages_model.ErrPackageFileNotExist {
-			apiError(ctx, http.StatusNotFound, err)
-			return
-		}
-		apiError(ctx, http.StatusInternalServerError, err)
+		apiError(ctx, helper.PackageErrorStatus(err), err)
 		return
 	}
 
@@ -273,9 +267,9 @@ func UnyankPackage(ctx *context.Context) {
 }
 
 func yankPackage(ctx *context.Context, yank bool) {
-	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypeCargo, ctx.Params("package"), ctx.Params("version"))
+	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypeCargo, ctx.PathParam("package"), ctx.PathParam("version"))
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}

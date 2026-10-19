@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"testing"
 
-	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/log"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/tests"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/tests"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -23,11 +23,67 @@ func TestAPICreateAndDeleteToken(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
 	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 1})
 
-	newAccessToken := createAPIAccessTokenWithoutCleanUp(t, "test-key-1", user, nil)
+	newAccessToken := createAPIAccessTokenWithoutCleanUp(t, "test-key-1", user, []auth_model.AccessTokenScope{auth_model.AccessTokenScopeAll})
 	deleteAPIAccessToken(t, newAccessToken, user)
 
-	newAccessToken = createAPIAccessTokenWithoutCleanUp(t, "test-key-2", user, nil)
+	newAccessToken = createAPIAccessTokenWithoutCleanUp(t, "test-key-2", user, []auth_model.AccessTokenScope{auth_model.AccessTokenScopeAll})
 	deleteAPIAccessToken(t, newAccessToken, user)
+}
+
+// TestAPICreateTokenScopeEscalation ensures a token-authenticated request cannot
+// mint a new token with a broader scope than the authenticating token.
+func TestAPICreateTokenScopeEscalation(t *testing.T) {
+	defer tests.PrepareTestEnv(t)()
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
+
+	// a write:user-scoped token authenticates the create requests below
+	writeUserToken := getUserToken(t, user.Name, auth_model.AccessTokenScopeWriteUser)
+
+	// requesting a broader scope ("all") than the authenticating token is rejected
+	req := NewRequestWithJSON(t, "POST", "/api/v1/users/"+user.LoginName+"/tokens", map[string]any{
+		"name":   "escalated",
+		"scopes": []string{"all"},
+	})
+	req.Request.SetBasicAuth(user.Name, writeUserToken)
+	MakeRequest(t, req, http.StatusForbidden)
+
+	// requesting a subset scope ("read:user") is allowed
+	req = NewRequestWithJSON(t, "POST", "/api/v1/users/"+user.LoginName+"/tokens", map[string]any{
+		"name":   "subset",
+		"scopes": []string{"read:user"},
+	})
+	req.Request.SetBasicAuth(user.Name, writeUserToken)
+	MakeRequest(t, req, http.StatusCreated)
+
+	// password (non-token) auth may still create a token with any scope
+	req = NewRequestWithJSON(t, "POST", "/api/v1/users/"+user.LoginName+"/tokens", map[string]any{
+		"name":   "by-password",
+		"scopes": []string{"all"},
+	}).AddBasicAuth(user.Name)
+	MakeRequest(t, req, http.StatusCreated)
+
+	// a public-only token must not mint a token that drops the public-only restriction
+	publicOnlyToken := getUserToken(t, user.Name, auth_model.AccessTokenScopeWriteUser, auth_model.AccessTokenScopePublicOnly)
+	req = NewRequestWithJSON(t, "POST", "/api/v1/users/"+user.LoginName+"/tokens", map[string]any{
+		"name":   "still-public-only",
+		"scopes": []string{"write:user"},
+	})
+	req.Request.SetBasicAuth(user.Name, publicOnlyToken)
+	resp := MakeRequest(t, req, http.StatusCreated)
+	var createdToken api.AccessToken
+	DecodeJSON(t, resp, &createdToken)
+	assert.Contains(t, createdToken.Scopes, string(auth_model.AccessTokenScopePublicOnly))
+
+	// an unrestricted parent token may create a narrower public-only child: public-only is a restriction,
+	// not a grantable permission, so the subset check must not reject it
+	req = NewRequestWithJSON(t, "POST", "/api/v1/users/"+user.LoginName+"/tokens", map[string]any{
+		"name":   "narrower-public-only",
+		"scopes": []string{"write:user", "public-only"},
+	})
+	req.Request.SetBasicAuth(user.Name, writeUserToken)
+	resp = MakeRequest(t, req, http.StatusCreated)
+	DecodeJSON(t, resp, &createdToken)
+	assert.Contains(t, createdToken.Scopes, string(auth_model.AccessTokenScopePublicOnly))
 }
 
 // TestAPIDeleteMissingToken ensures that error is thrown when token not found
@@ -72,19 +128,19 @@ func TestAPIDeleteTokensPermission(t *testing.T) {
 	user4 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 4})
 
 	// admin can delete tokens for other users
-	createAPIAccessTokenWithoutCleanUp(t, "test-key-1", user2, nil)
+	createAPIAccessTokenWithoutCleanUp(t, "test-key-1", user2, []auth_model.AccessTokenScope{auth_model.AccessTokenScopeAll})
 	req := NewRequest(t, "DELETE", "/api/v1/users/"+user2.LoginName+"/tokens/test-key-1").
 		AddBasicAuth(admin.Name)
 	MakeRequest(t, req, http.StatusNoContent)
 
 	// non-admin can delete tokens for himself
-	createAPIAccessTokenWithoutCleanUp(t, "test-key-2", user2, nil)
+	createAPIAccessTokenWithoutCleanUp(t, "test-key-2", user2, []auth_model.AccessTokenScope{auth_model.AccessTokenScopeAll})
 	req = NewRequest(t, "DELETE", "/api/v1/users/"+user2.LoginName+"/tokens/test-key-2").
 		AddBasicAuth(user2.Name)
 	MakeRequest(t, req, http.StatusNoContent)
 
 	// non-admin can't delete tokens for other users
-	createAPIAccessTokenWithoutCleanUp(t, "test-key-3", user2, nil)
+	createAPIAccessTokenWithoutCleanUp(t, "test-key-3", user2, []auth_model.AccessTokenScope{auth_model.AccessTokenScopeAll})
 	req = NewRequest(t, "DELETE", "/api/v1/users/"+user2.LoginName+"/tokens/test-key-3").
 		AddBasicAuth(user4.Name)
 	MakeRequest(t, req, http.StatusForbidden)
@@ -502,25 +558,26 @@ func runTestCase(t *testing.T, testCase *requiredScopeTestCase, user *user_model
 			}
 			unauthorizedLevel := auth_model.Write
 			if categoryIsRequired {
-				if minRequiredLevel == auth_model.Read {
+				switch minRequiredLevel {
+				case auth_model.Read:
 					unauthorizedLevel = auth_model.NoAccess
-				} else if minRequiredLevel == auth_model.Write {
+				case auth_model.Write:
 					unauthorizedLevel = auth_model.Read
-				} else {
-					assert.FailNow(t, "Invalid test case: Unknown access token scope level: %v", minRequiredLevel)
+				default:
+					assert.FailNow(t, "Invalid test case", "Unknown access token scope level: %v", minRequiredLevel)
 				}
 			}
 
 			if unauthorizedLevel == auth_model.NoAccess {
 				continue
 			}
-			cateogoryUnauthorizedScopes := auth_model.GetRequiredScopes(
+			categoryUnauthorizedScopes := auth_model.GetRequiredScopes(
 				unauthorizedLevel,
 				category)
-			unauthorizedScopes = append(unauthorizedScopes, cateogoryUnauthorizedScopes...)
+			unauthorizedScopes = append(unauthorizedScopes, categoryUnauthorizedScopes...)
 		}
 
-		accessToken := createAPIAccessTokenWithoutCleanUp(t, "test-token", user, &unauthorizedScopes)
+		accessToken := createAPIAccessTokenWithoutCleanUp(t, "test-token", user, unauthorizedScopes)
 		defer deleteAPIAccessToken(t, accessToken, user)
 
 		// Request the endpoint.  Verify that permission is denied.
@@ -532,27 +589,18 @@ func runTestCase(t *testing.T, testCase *requiredScopeTestCase, user *user_model
 
 // createAPIAccessTokenWithoutCleanUp Create an API access token and assert that
 // creation succeeded.  The caller is responsible for deleting the token.
-func createAPIAccessTokenWithoutCleanUp(t *testing.T, tokenName string, user *user_model.User, scopes *[]auth_model.AccessTokenScope) api.AccessToken {
+func createAPIAccessTokenWithoutCleanUp(t *testing.T, tokenName string, user *user_model.User, scopes []auth_model.AccessTokenScope) api.AccessToken {
 	payload := map[string]any{
-		"name": tokenName,
+		"name":   tokenName,
+		"scopes": scopes,
 	}
-	if scopes != nil {
-		for _, scope := range *scopes {
-			scopes, scopesExists := payload["scopes"].([]string)
-			if !scopesExists {
-				scopes = make([]string, 0)
-			}
-			scopes = append(scopes, string(scope))
-			payload["scopes"] = scopes
-		}
-	}
+
 	log.Debug("Requesting creation of token with scopes: %v", scopes)
 	req := NewRequestWithJSON(t, "POST", "/api/v1/users/"+user.LoginName+"/tokens", payload).
 		AddBasicAuth(user.Name)
 	resp := MakeRequest(t, req, http.StatusCreated)
 
-	var newAccessToken api.AccessToken
-	DecodeJSON(t, resp, &newAccessToken)
+	newAccessToken := DecodeJSON(t, resp, &api.AccessToken{})
 	unittest.AssertExistsAndLoadBean(t, &auth_model.AccessToken{
 		ID:    newAccessToken.ID,
 		Name:  newAccessToken.Name,
@@ -560,11 +608,10 @@ func createAPIAccessTokenWithoutCleanUp(t *testing.T, tokenName string, user *us
 		UID:   user.ID,
 	})
 
-	return newAccessToken
+	return *newAccessToken
 }
 
-// createAPIAccessTokenWithoutCleanUp Delete an API access token and assert that
-// deletion succeeded.
+// deleteAPIAccessToken deletes an API access token and assert that deletion succeeded.
 func deleteAPIAccessToken(t *testing.T, accessToken api.AccessToken, user *user_model.User) {
 	req := NewRequestf(t, "DELETE", "/api/v1/users/"+user.LoginName+"/tokens/%d", accessToken.ID).
 		AddBasicAuth(user.Name)

@@ -13,25 +13,22 @@ import (
 	"strings"
 	"time"
 
-	packages_model "code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/log"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	pub_module "code.gitea.io/gitea/modules/packages/pub"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	packages_service "code.gitea.io/gitea/services/packages"
+	packages_model "gitea.dev/models/packages"
+	"gitea.dev/modules/json"
+	packages_module "gitea.dev/modules/packages"
+	pub_module "gitea.dev/modules/packages/pub"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	packages_service "gitea.dev/services/packages"
 )
 
 func jsonResponse(ctx *context.Context, status int, obj any) {
 	resp := ctx.Resp
 	resp.Header().Set("Content-Type", "application/vnd.pub.v2+json")
 	resp.WriteHeader(status)
-	if err := json.NewEncoder(resp).Encode(obj); err != nil {
-		log.Error("JSON encode: %v", err)
-	}
+	_ = json.NewEncoder(resp).Encode(obj)
 }
 
 func apiError(ctx *context.Context, status int, obj any) {
@@ -43,13 +40,12 @@ func apiError(ctx *context.Context, status int, obj any) {
 		Error Error `json:"error"`
 	}
 
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		jsonResponse(ctx, status, ErrorWrapper{
-			Error: Error{
-				Code:    http.StatusText(status),
-				Message: message,
-			},
-		})
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	jsonResponse(ctx, status, ErrorWrapper{
+		Error: Error{
+			Code:    http.StatusText(status),
+			Message: message,
+		},
 	})
 }
 
@@ -71,7 +67,7 @@ func packageDescriptorToMetadata(baseURL string, pd *packages_model.PackageDescr
 		Version:    pd.Version.Version,
 		ArchiveURL: fmt.Sprintf("%s/files/%s.tar.gz", baseURL, url.PathEscape(pd.Version.Version)),
 		Published:  pd.Version.CreatedUnix.AsLocalTime(),
-		Pubspec:    pd.Metadata.(*pub_module.Metadata).Pubspec,
+		Pubspec:    packages_model.DescriptorMetadata[*pub_module.Metadata](pd).Pubspec,
 	}
 }
 
@@ -81,7 +77,7 @@ func baseURL(ctx *context.Context) string {
 
 // https://github.com/dart-lang/pub/blob/master/doc/repository-spec-v2.md#list-all-versions-of-a-package
 func EnumeratePackageVersions(ctx *context.Context) {
-	packageName := ctx.Params("id")
+	packageName := ctx.PathParam("id")
 
 	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypePub, packageName)
 	if err != nil {
@@ -112,19 +108,19 @@ func EnumeratePackageVersions(ctx *context.Context) {
 
 	jsonResponse(ctx, http.StatusOK, &packageVersions{
 		Name:     pds[0].Package.Name,
-		Latest:   packageDescriptorToMetadata(baseURL, pds[0]),
+		Latest:   versions[len(versions)-1], // versions mirrors pds, sorted ascending
 		Versions: versions,
 	})
 }
 
 // https://github.com/dart-lang/pub/blob/master/doc/repository-spec-v2.md#deprecated-inspect-a-specific-version-of-a-package
 func PackageVersionMetadata(ctx *context.Context) {
-	packageName := ctx.Params("id")
-	packageVersion := ctx.Params("version")
+	packageName := ctx.PathParam("id")
+	packageVersion := ctx.PathParam("version")
 
 	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypePub, packageName, packageVersion)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -228,12 +224,12 @@ func UploadPackageFile(ctx *context.Context) {
 
 // https://github.com/dart-lang/pub/blob/master/doc/repository-spec-v2.md#publishing-packages
 func FinalizePackage(ctx *context.Context) {
-	packageName := ctx.Params("id")
-	packageVersion := ctx.Params("version")
+	packageName := ctx.PathParam("id")
+	packageVersion := ctx.PathParam("version")
 
 	_, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypePub, packageName, packageVersion)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -253,12 +249,12 @@ func FinalizePackage(ctx *context.Context) {
 
 // https://github.com/dart-lang/pub/blob/master/doc/repository-spec-v2.md#deprecated-download-a-specific-version-of-a-package
 func DownloadPackageFile(ctx *context.Context) {
-	packageName := ctx.Params("id")
-	packageVersion := strings.TrimSuffix(ctx.Params("version"), ".tar.gz")
+	packageName := ctx.PathParam("id")
+	packageVersion := strings.TrimSuffix(ctx.PathParam("version"), ".tar.gz")
 
 	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypePub, packageName, packageVersion)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -274,7 +270,7 @@ func DownloadPackageFile(ctx *context.Context) {
 
 	pf := pd.Files[0].File
 
-	s, u, _, err := packages_service.GetPackageFileStream(ctx, pf)
+	s, u, _, err := packages_service.OpenFileForDownload(ctx, pf, ctx.Req.Method)
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return

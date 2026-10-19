@@ -6,21 +6,22 @@ package incoming
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/upload"
-	"code.gitea.io/gitea/modules/util"
-	attachment_service "code.gitea.io/gitea/services/attachment"
-	issue_service "code.gitea.io/gitea/services/issue"
-	incoming_payload "code.gitea.io/gitea/services/mailer/incoming/payload"
-	"code.gitea.io/gitea/services/mailer/token"
-	pull_service "code.gitea.io/gitea/services/pull"
+	issues_model "gitea.dev/models/issues"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	attachment_service "gitea.dev/services/attachment"
+	"gitea.dev/services/context/upload"
+	issue_service "gitea.dev/services/issue"
+	incoming_payload "gitea.dev/services/mailer/incoming/payload"
+	"gitea.dev/services/mailer/token"
+	pull_service "gitea.dev/services/pull"
 )
 
 type MailHandler interface {
@@ -66,7 +67,7 @@ func (h *ReplyHandler) Handle(ctx context.Context, content *MailContent, doer *u
 		return err
 	}
 
-	perm, err := access_model.GetUserRepoPermission(ctx, issue.Repo, doer)
+	perm, err := access_model.GetDoerRepoPermission(ctx, issue.Repo, doer)
 	if err != nil {
 		return err
 	}
@@ -82,43 +83,47 @@ func (h *ReplyHandler) Handle(ctx context.Context, content *MailContent, doer *u
 		return nil
 	}
 
+	attachmentIDs := make([]string, 0, len(content.Attachments))
+	if setting.Attachment.Enabled {
+		for _, attachment := range content.Attachments {
+			attachmentBuf := bytes.NewReader(attachment.Content)
+			uploaderFile := attachment_service.NewLimitedUploaderKnownSize(attachmentBuf, attachmentBuf.Size())
+			a, err := attachment_service.UploadAttachmentForIssue(ctx, uploaderFile, &repo_model.Attachment{
+				Name:       attachment.Name,
+				UploaderID: doer.ID,
+				RepoID:     issue.Repo.ID,
+			})
+			if err != nil {
+				if upload.IsErrFileTypeForbidden(err) {
+					log.Info("Skipping disallowed attachment type: %s", attachment.Name)
+					continue
+				}
+				if errors.Is(err, util.ErrContentTooLarge) {
+					log.Info("Skipping attachment exceeding size limit: %s", attachment.Name)
+					continue
+				}
+
+				return err
+			}
+			attachmentIDs = append(attachmentIDs, a.UUID)
+		}
+	}
+
+	if content.Content == "" && len(attachmentIDs) == 0 {
+		return nil
+	}
+
 	switch r := ref.(type) {
 	case *issues_model.Issue:
-		attachmentIDs := make([]string, 0, len(content.Attachments))
-		if setting.Attachment.Enabled {
-			for _, attachment := range content.Attachments {
-				a, err := attachment_service.UploadAttachment(ctx, bytes.NewReader(attachment.Content), setting.Attachment.AllowedTypes, int64(len(attachment.Content)), &repo_model.Attachment{
-					Name:       attachment.Name,
-					UploaderID: doer.ID,
-					RepoID:     issue.Repo.ID,
-				})
-				if err != nil {
-					if upload.IsErrFileTypeForbidden(err) {
-						log.Info("Skipping disallowed attachment type: %s", attachment.Name)
-						continue
-					}
-					return err
-				}
-				attachmentIDs = append(attachmentIDs, a.UUID)
-			}
-		}
-
-		if content.Content == "" && len(attachmentIDs) == 0 {
-			return nil
-		}
-
-		_, err = issue_service.CreateIssueComment(ctx, doer, issue.Repo, issue, content.Content, attachmentIDs)
+		_, err := issue_service.CreateIssueComment(ctx, doer, issue.Repo, issue, content.Content, attachmentIDs)
 		if err != nil {
 			return fmt.Errorf("CreateIssueComment failed: %w", err)
 		}
 	case *issues_model.Comment:
 		comment := r
 
-		if content.Content == "" {
-			return nil
-		}
-
-		if comment.Type == issues_model.CommentTypeCode {
+		switch comment.Type {
+		case issues_model.CommentTypeCode:
 			_, err := pull_service.CreateCodeComment(
 				ctx,
 				doer,
@@ -130,9 +135,15 @@ func (h *ReplyHandler) Handle(ctx context.Context, content *MailContent, doer *u
 				false, // not pending review but a single review
 				comment.ReviewID,
 				"",
+				attachmentIDs,
 			)
 			if err != nil {
 				return fmt.Errorf("CreateCodeComment failed: %w", err)
+			}
+		default:
+			_, err := issue_service.CreateIssueComment(ctx, doer, issue.Repo, issue, content.Content, attachmentIDs)
+			if err != nil {
+				return fmt.Errorf("CreateIssueComment failed: %w", err)
 			}
 		}
 	}
@@ -160,7 +171,7 @@ func (h *UnsubscribeHandler) Handle(ctx context.Context, _ *MailContent, doer *u
 			return err
 		}
 
-		perm, err := access_model.GetUserRepoPermission(ctx, issue.Repo, doer)
+		perm, err := access_model.GetDoerRepoPermission(ctx, issue.Repo, doer)
 		if err != nil {
 			return err
 		}

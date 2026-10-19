@@ -7,13 +7,13 @@ import (
 	"context"
 	"time"
 
-	packages_model "code.gitea.io/gitea/models/packages"
-	container_model "code.gitea.io/gitea/models/packages/container"
-	container_module "code.gitea.io/gitea/modules/packages/container"
-	"code.gitea.io/gitea/modules/util"
-	packages_service "code.gitea.io/gitea/services/packages"
+	packages_model "gitea.dev/models/packages"
+	container_model "gitea.dev/models/packages/container"
+	"gitea.dev/modules/optional"
+	container_module "gitea.dev/modules/packages/container"
+	packages_service "gitea.dev/services/packages"
 
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 )
 
 // Cleanup removes expired container data
@@ -57,10 +57,10 @@ func cleanupExpiredUploadedBlobs(ctx context.Context, olderThan time.Duration) e
 		Type: packages_model.TypeContainer,
 		Version: packages_model.SearchValue{
 			ExactMatch: true,
-			Value:      container_model.UploadVersion,
+			Value:      container_module.UploadVersion,
 		},
-		IsInternal: util.OptionalBoolTrue,
-		HasFiles:   util.OptionalBoolFalse,
+		IsInternal: optional.Some(true),
+		HasFiles:   optional.Some(false),
 	})
 	if err != nil {
 		return err

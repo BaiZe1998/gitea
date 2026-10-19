@@ -14,20 +14,20 @@ import (
 	"testing"
 	"time"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/indexer/issues/internal"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/indexer/issues/internal"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/timeutil"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestIndexer(t *testing.T, indexer internal.Indexer) {
-	_, err := indexer.Init(context.Background())
+	_, err := indexer.Init(t.Context())
 	require.NoError(t, err)
 
-	require.NoError(t, indexer.Ping(context.Background()))
+	require.NoError(t, indexer.Ping(t.Context()))
 
 	var (
 		ids  []int64
@@ -39,32 +39,32 @@ func TestIndexer(t *testing.T, indexer internal.Indexer) {
 			ids = append(ids, v.ID)
 			data[v.ID] = v
 		}
-		require.NoError(t, indexer.Index(context.Background(), d...))
-		require.NoError(t, waitData(indexer, int64(len(data))))
+		require.NoError(t, indexer.Index(t.Context(), d...))
+		waitData(t, indexer, int64(len(data)))
 	}
 
 	defer func() {
-		require.NoError(t, indexer.Delete(context.Background(), ids...))
+		require.NoError(t, indexer.Delete(t.Context(), ids...))
 	}()
 
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
 			if len(c.ExtraData) > 0 {
-				require.NoError(t, indexer.Index(context.Background(), c.ExtraData...))
+				require.NoError(t, indexer.Index(t.Context(), c.ExtraData...))
 				for _, v := range c.ExtraData {
 					data[v.ID] = v
 				}
-				require.NoError(t, waitData(indexer, int64(len(data))))
+				waitData(t, indexer, int64(len(data)))
 				defer func() {
 					for _, v := range c.ExtraData {
-						require.NoError(t, indexer.Delete(context.Background(), v.ID))
+						require.NoError(t, indexer.Delete(t.Context(), v.ID))
 						delete(data, v.ID)
 					}
-					require.NoError(t, waitData(indexer, int64(len(data))))
+					waitData(t, indexer, int64(len(data)))
 				}()
 			}
 
-			result, err := indexer.Search(context.Background(), c.SearchOptions)
+			result, err := indexer.Search(t.Context(), c.SearchOptions)
 			require.NoError(t, err)
 
 			if c.Expected != nil {
@@ -77,6 +77,13 @@ func TestIndexer(t *testing.T, indexer internal.Indexer) {
 				assert.Equal(t, c.ExpectedIDs, ids)
 				assert.Equal(t, c.ExpectedTotal, result.Total)
 			}
+
+			// test counting
+			c.SearchOptions.Paginator = &db.ListOptions{PageSize: 0}
+			countResult, err := indexer.Search(t.Context(), c.SearchOptions)
+			require.NoError(t, err)
+			assert.Empty(t, countResult.Hits)
+			assert.Equal(t, result.Total, countResult.Total)
 		})
 	}
 }
@@ -86,7 +93,7 @@ var cases = []*testIndexerCase{
 		Name:          "default",
 		SearchOptions: &internal.SearchOptions{},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 		},
 	},
@@ -106,9 +113,19 @@ var cases = []*testIndexerCase{
 			},
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			assert.Equal(t, len(data), int(result.Total))
 		},
+	},
+	{
+		// Exercises the single-doc Index/Delete fast path in backends that have one (e.g. Elasticsearch).
+		Name: "single-doc index",
+		ExtraData: []*internal.IndexerData{
+			{ID: 999, Title: "solo-issue-marker"},
+		},
+		SearchOptions: &internal.SearchOptions{Keyword: "solo-issue-marker"},
+		ExpectedIDs:   []int64{999},
+		ExpectedTotal: 1,
 	},
 	{
 		Name: "Keyword",
@@ -166,10 +183,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			IsPull: util.OptionalBoolFalse,
+			IsPull: optional.Some(false),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.False(t, data[v.ID].IsPull)
 			}
@@ -182,10 +199,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			IsPull: util.OptionalBoolTrue,
+			IsPull: optional.Some(true),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.True(t, data[v.ID].IsPull)
 			}
@@ -198,10 +215,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			IsClosed: util.OptionalBoolFalse,
+			IsClosed: optional.Some(false),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.False(t, data[v.ID].IsClosed)
 			}
@@ -214,10 +231,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			IsClosed: util.OptionalBoolTrue,
+			IsClosed: optional.Some(true),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.True(t, data[v.ID].IsClosed)
 			}
@@ -267,7 +284,7 @@ var cases = []*testIndexerCase{
 			MilestoneIDs: []int64{1, 2, 6},
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Contains(t, []int64{1, 2, 6}, data[v.ID].MilestoneID)
 			}
@@ -285,7 +302,7 @@ var cases = []*testIndexerCase{
 			MilestoneIDs: []int64{0},
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Equal(t, int64(0), data[v.ID].MilestoneID)
 			}
@@ -295,87 +312,41 @@ var cases = []*testIndexerCase{
 		},
 	},
 	{
-		Name: "ProjectID",
+		Name: "ProjectIDs",
 		SearchOptions: &internal.SearchOptions{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			ProjectID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			ProjectIDs: []int64{1},
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
-				assert.Equal(t, int64(1), data[v.ID].ProjectID)
+				assert.Contains(t, data[v.ID].ProjectIDs, int64(1))
 			}
 			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
-				return v.ProjectID == 1
+				return slices.Contains(v.ProjectIDs, int64(1))
 			}), result.Total)
 		},
 	},
 	{
-		Name: "no ProjectID",
+		Name: "no ProjectIDs (empty array)",
 		SearchOptions: &internal.SearchOptions{
 			Paginator: &db.ListOptions{
-				PageSize: 5,
+				PageSize: 50,
 			},
-			ProjectID: func() *int64 {
-				id := int64(0)
-				return &id
-			}(),
+			NoProjectOnly: true,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			// Verify only issues with no projects are returned
 			for _, v := range result.Hits {
-				assert.Equal(t, int64(0), data[v.ID].ProjectID)
+				assert.Empty(t, data[v.ID].ProjectIDs, "Issue %d should have no projects", v.ID)
 			}
-			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
-				return v.ProjectID == 0
-			}), result.Total)
-		},
-	},
-	{
-		Name: "ProjectBoardID",
-		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				PageSize: 5,
-			},
-			ProjectBoardID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
-		},
-		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
-			for _, v := range result.Hits {
-				assert.Equal(t, int64(1), data[v.ID].ProjectBoardID)
-			}
-			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
-				return v.ProjectBoardID == 1
-			}), result.Total)
-		},
-	},
-	{
-		Name: "no ProjectBoardID",
-		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				PageSize: 5,
-			},
-			ProjectBoardID: func() *int64 {
-				id := int64(0)
-				return &id
-			}(),
-		},
-		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
-			for _, v := range result.Hits {
-				assert.Equal(t, int64(0), data[v.ID].ProjectBoardID)
-			}
-			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
-				return v.ProjectBoardID == 0
-			}), result.Total)
+			// Verify we got ALL issues with no projects
+			expectedCount := countIndexerData(data, func(v *internal.IndexerData) bool {
+				return len(v.ProjectIDs) == 0
+			})
+			assert.Equal(t, expectedCount, result.Total, "Should return all %d issues with no project", expectedCount)
 		},
 	},
 	{
@@ -384,13 +355,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			PosterID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			PosterID: "1",
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Equal(t, int64(1), data[v.ID].PosterID)
 			}
@@ -405,18 +373,15 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			AssigneeID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			AssigneeID: "1",
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
-				assert.Equal(t, int64(1), data[v.ID].AssigneeID)
+				assert.True(t, slices.Contains(data[v.ID].AssigneeIDs, int64(1)))
 			}
 			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
-				return v.AssigneeID == 1
+				return slices.Contains(v.AssigneeIDs, int64(1))
 			}), result.Total)
 		},
 	},
@@ -426,18 +391,15 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			AssigneeID: func() *int64 {
-				id := int64(0)
-				return &id
-			}(),
+			AssigneeID: "(none)",
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
-				assert.Equal(t, int64(0), data[v.ID].AssigneeID)
+				assert.True(t, data[v.ID].NoAssignee)
 			}
 			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
-				return v.AssigneeID == 0
+				return v.NoAssignee
 			}), result.Total)
 		},
 	},
@@ -447,13 +409,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			MentionID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			MentionID: optional.Some(int64(1)),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Contains(t, data[v.ID].MentionIDs, int64(1))
 			}
@@ -468,13 +427,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			ReviewedID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			ReviewedID: optional.Some(int64(1)),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Contains(t, data[v.ID].ReviewedIDs, int64(1))
 			}
@@ -489,13 +445,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			ReviewRequestedID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			ReviewRequestedID: optional.Some(int64(1)),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Contains(t, data[v.ID].ReviewRequestedIDs, int64(1))
 			}
@@ -510,13 +463,10 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			SubscriberID: func() *int64 {
-				id := int64(1)
-				return &id
-			}(),
+			SubscriberID: optional.Some(int64(1)),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.Contains(t, data[v.ID].SubscriberIDs, int64(1))
 			}
@@ -531,17 +481,11 @@ var cases = []*testIndexerCase{
 			Paginator: &db.ListOptions{
 				PageSize: 5,
 			},
-			UpdatedAfterUnix: func() *int64 {
-				var t int64 = 20
-				return &t
-			}(),
-			UpdatedBeforeUnix: func() *int64 {
-				var t int64 = 30
-				return &t
-			}(),
+			UpdatedAfterUnix:  optional.Some(int64(20)),
+			UpdatedBeforeUnix: optional.Some(int64(30)),
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, 5, len(result.Hits))
+			assert.Len(t, result.Hits, 5)
 			for _, v := range result.Hits {
 				assert.GreaterOrEqual(t, data[v.ID].UpdatedUnix, int64(20))
 				assert.LessOrEqual(t, data[v.ID].UpdatedUnix, int64(30))
@@ -554,13 +498,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByCreatedDesc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByCreatedDesc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByCreatedDesc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -572,13 +514,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByUpdatedDesc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByUpdatedDesc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByUpdatedDesc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -590,13 +530,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByCommentsDesc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByCommentsDesc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByCommentsDesc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -608,13 +546,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByDeadlineDesc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByDeadlineDesc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByDeadlineDesc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -626,13 +562,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByCreatedAsc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByCreatedAsc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByCreatedAsc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -644,13 +578,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByUpdatedAsc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByUpdatedAsc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByUpdatedAsc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -662,13 +594,11 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByCommentsAsc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByCommentsAsc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByCommentsAsc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
@@ -680,19 +610,32 @@ var cases = []*testIndexerCase{
 	{
 		Name: "SortByDeadlineAsc",
 		SearchOptions: &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				ListAll: true,
-			},
-			SortBy: internal.SortByDeadlineAsc,
+			Paginator: &db.ListOptionsAll,
+			SortBy:    internal.SortByDeadlineAsc,
 		},
 		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
-			assert.Equal(t, len(data), len(result.Hits))
+			assert.Len(t, result.Hits, len(data))
 			assert.Equal(t, len(data), int(result.Total))
 			for i, v := range result.Hits {
 				if i < len(result.Hits)-1 {
 					assert.LessOrEqual(t, data[v.ID].DeadlineUnix, data[result.Hits[i+1].ID].DeadlineUnix)
 				}
 			}
+		},
+	},
+	{
+		Name: "SearchAnyAssignee",
+		SearchOptions: &internal.SearchOptions{
+			AssigneeID: "(any)",
+		},
+		Expected: func(t *testing.T, data map[int64]*internal.IndexerData, result *internal.SearchResult) {
+			assert.Len(t, result.Hits, 180)
+			for _, v := range result.Hits {
+				assert.False(t, data[v.ID].NoAssignee)
+			}
+			assert.Equal(t, countIndexerData(data, func(v *internal.IndexerData) bool {
+				return !v.NoAssignee
+			}), result.Total)
 		},
 	},
 }
@@ -740,6 +683,22 @@ func generateDefaultIndexerData() []*internal.IndexerData {
 			for i := range subscriberIDs {
 				subscriberIDs[i] = int64(i) + 1 // SubscriberID should not be 0
 			}
+			projectIDs := make([]int64, id%5)
+			for i := range projectIDs {
+				projectIDs[i] = int64(i) + 1 // projectID should not be 0
+			}
+			var assigneeIDs []int64
+			if issueIndex%10 != 0 {
+				assigneeID := issueIndex % 10
+				assigneeIDs = []int64{assigneeID}
+				if issueIndex%3 == 0 {
+					nextAssigneeID := assigneeID + 1
+					if nextAssigneeID == 10 {
+						nextAssigneeID = 1
+					}
+					assigneeIDs = append(assigneeIDs, nextAssigneeID)
+				}
+			}
 
 			data = append(data, &internal.IndexerData{
 				ID:                 id,
@@ -753,10 +712,11 @@ func generateDefaultIndexerData() []*internal.IndexerData {
 				LabelIDs:           labelIDs,
 				NoLabel:            len(labelIDs) == 0,
 				MilestoneID:        issueIndex % 4,
-				ProjectID:          issueIndex % 5,
-				ProjectBoardID:     issueIndex % 6,
+				ProjectIDs:         projectIDs,
+				NoProject:          len(projectIDs) == 0,
 				PosterID:           id%10 + 1, // PosterID should not be 0
-				AssigneeID:         issueIndex % 10,
+				AssigneeIDs:        assigneeIDs,
+				NoAssignee:         len(assigneeIDs) == 0,
 				MentionIDs:         mentionIDs,
 				ReviewedIDs:        reviewedIDs,
 				ReviewRequestedIDs: reviewRequestedIDs,
@@ -784,22 +744,13 @@ func countIndexerData(data map[int64]*internal.IndexerData, f func(v *internal.I
 
 // waitData waits for the indexer to index all data.
 // Some engines like Elasticsearch index data asynchronously, so we need to wait for a while.
-func waitData(indexer internal.Indexer, total int64) error {
-	var actual int64
-	for i := 0; i < 100; i++ {
-		result, err := indexer.Search(context.Background(), &internal.SearchOptions{
-			Paginator: &db.ListOptions{
-				PageSize: 0,
-			},
-		})
-		if err != nil {
-			return err
-		}
-		actual = result.Total
-		if actual == total {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+func waitData(t *testing.T, indexer internal.Indexer, total int64) {
+	if refresher, ok := indexer.(interface{ Refresh(context.Context) error }); ok {
+		require.NoError(t, refresher.Refresh(t.Context()))
 	}
-	return fmt.Errorf("waitData: expected %d, actual %d", total, actual)
+	assert.Eventually(t, func() bool {
+		result, err := indexer.Search(t.Context(), &internal.SearchOptions{Paginator: &db.ListOptions{}})
+		require.NoError(t, err)
+		return result.Total == total
+	}, 10*time.Second, 100*time.Millisecond, "expected total=%d", total)
 }

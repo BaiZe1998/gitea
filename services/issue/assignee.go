@@ -6,23 +6,21 @@ package issue
 import (
 	"context"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	"code.gitea.io/gitea/models/organization"
-	"code.gitea.io/gitea/models/perm"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	"code.gitea.io/gitea/models/unit"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/log"
-	notify_service "code.gitea.io/gitea/services/notify"
+	"gitea.dev/models/db"
+	issues_model "gitea.dev/models/issues"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/container"
+	notify_service "gitea.dev/services/notify"
 )
 
-// DeleteNotPassedAssignee deletes all assignees who aren't passed via the "assignees" array
-func DeleteNotPassedAssignee(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assignees []*user_model.User) (err error) {
+func toBeRemovedAssignees(issue *issues_model.Issue, assignees []*user_model.User) (toBeRemovedAssignees []*user_model.User) {
 	var found bool
-	oriAssignes := make([]*user_model.User, len(issue.Assignees))
-	_ = copy(oriAssignes, issue.Assignees)
+	oriAssignees := make([]*user_model.User, len(issue.Assignees))
+	_ = copy(oriAssignees, issue.Assignees)
 
-	for _, assignee := range oriAssignes {
+	for _, assignee := range oriAssignees {
 		found = false
 		for _, alreadyAssignee := range assignees {
 			if assignee.ID == alreadyAssignee.ID {
@@ -33,23 +31,51 @@ func DeleteNotPassedAssignee(ctx context.Context, issue *issues_model.Issue, doe
 
 		if !found {
 			// This function also does comments and hooks, which is why we call it separately instead of directly removing the assignees here
-			if _, _, err := ToggleAssigneeWithNotify(ctx, issue, doer, assignee.ID); err != nil {
-				return err
-			}
+			toBeRemovedAssignees = append(toBeRemovedAssignees, assignee)
+		}
+	}
+	return toBeRemovedAssignees
+}
+
+// DeleteNotPassedAssignee deletes all assignees who aren't passed via the "assignees" array
+func DeleteNotPassedAssignee(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assignees []*user_model.User) (err error) {
+	toBeRemoved := toBeRemovedAssignees(issue, assignees)
+
+	for _, assignee := range toBeRemoved {
+		// This function also does comments and hooks, which is why we call it separately instead of directly removing the assignees here
+		removed, comment, err := ToggleAssignee(ctx, issue, doer, assignee)
+		if err != nil {
+			return err
+		}
+		if removed {
+			notify_service.IssueChangeAssignee(ctx, doer, issue, assignee, true, comment)
 		}
 	}
 
 	return nil
 }
 
-// ToggleAssigneeWithNoNotify changes a user between assigned and not assigned for this issue, and make issue comment for it.
-func ToggleAssigneeWithNotify(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assigneeID int64) (removed bool, comment *issues_model.Comment, err error) {
-	removed, comment, err = issues_model.ToggleIssueAssignee(ctx, issue, doer, assigneeID)
+// ToggleAssignee changes a user between assigned and not assigned for this issue, and make issue comment for it.
+func ToggleAssignee(ctx context.Context, issue *issues_model.Issue, doer, assignee *user_model.User) (removed bool, comment *issues_model.Comment, err error) {
+	removed, comment, err = issues_model.ToggleIssueAssignee(ctx, issue, doer, assignee.ID)
 	if err != nil {
 		return false, nil, err
 	}
 
+	issue.AssigneeID = assignee.ID
+	issue.Assignee = assignee
+
+	return removed, comment, nil
+}
+
+// ToggleAssignee changes a user between assigned and not assigned for this issue, and make issue comment for it.
+func ToggleAssigneeWithNotify(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assigneeID int64) (removed bool, comment *issues_model.Comment, err error) {
 	assignee, err := user_model.GetUserByID(ctx, assigneeID)
+	if err != nil {
+		return false, nil, err
+	}
+
+	removed, comment, err = ToggleAssignee(ctx, issue, doer, assignee)
 	if err != nil {
 		return false, nil, err
 	}
@@ -59,208 +85,201 @@ func ToggleAssigneeWithNotify(ctx context.Context, issue *issues_model.Issue, do
 	return removed, comment, err
 }
 
-// ReviewRequest add or remove a review request from a user for this PR, and make comment for it.
-func ReviewRequest(ctx context.Context, issue *issues_model.Issue, doer, reviewer *user_model.User, isAdd bool) (comment *issues_model.Comment, err error) {
-	if isAdd {
-		comment, err = issues_model.AddReviewRequest(ctx, issue, reviewer, doer)
-	} else {
-		comment, err = issues_model.RemoveReviewRequest(ctx, issue, reviewer, doer)
+// UpdateAssignees is a helper function to add or delete one or multiple issue assignee(s)
+// Deleting is done the GitHub way (quote from their api documentation):
+// https://developer.github.com/v3/issues/#edit-an-issue
+// "assignees" (array): Logins for Users to assign to this issue.
+// Pass one or more user logins to replace the set of assignees on this Issue.
+// Send an empty array ([]) to clear all assignees from the Issue.
+func UpdateAssignees(ctx context.Context, issue *issues_model.Issue, oneAssignee string, multipleAssignees []string, doer *user_model.User) (err error) {
+	uniqueAssignees := container.SetOf(multipleAssignees...)
+
+	// Keep the old assignee thingy for compatibility reasons
+	if oneAssignee != "" {
+		uniqueAssignees.Add(oneAssignee)
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
-	if comment != nil {
-		notify_service.PullRequestReviewRequest(ctx, doer, issue, reviewer, isAdd, comment)
-	}
-
-	return comment, err
-}
-
-// IsValidReviewRequest Check permission for ReviewRequest
-func IsValidReviewRequest(ctx context.Context, reviewer, doer *user_model.User, isAdd bool, issue *issues_model.Issue, permDoer *access_model.Permission) error {
-	if reviewer.IsOrganization() {
-		return issues_model.ErrNotValidReviewRequest{
-			Reason: "Organization can't be added as reviewer",
-			UserID: doer.ID,
-			RepoID: issue.Repo.ID,
-		}
-	}
-	if doer.IsOrganization() {
-		return issues_model.ErrNotValidReviewRequest{
-			Reason: "Organization can't be doer to add reviewer",
-			UserID: doer.ID,
-			RepoID: issue.Repo.ID,
-		}
-	}
-
-	permReviewer, err := access_model.GetUserRepoPermission(ctx, issue.Repo, reviewer)
-	if err != nil {
-		return err
-	}
-
-	if permDoer == nil {
-		permDoer = new(access_model.Permission)
-		*permDoer, err = access_model.GetUserRepoPermission(ctx, issue.Repo, doer)
+	// Loop through all assignees to add them
+	allNewAssignees := make([]*user_model.User, 0, len(uniqueAssignees))
+	for _, assigneeName := range uniqueAssignees.Values() {
+		assignee, err := user_model.GetUserByName(ctx, assigneeName)
 		if err != nil {
 			return err
 		}
+
+		if err := validateAssignee(ctx, issue, doer, assignee); err != nil {
+			return err
+		}
+
+		allNewAssignees = append(allNewAssignees, assignee)
 	}
 
-	lastreview, err := issues_model.GetReviewByIssueIDAndUserID(ctx, issue.ID, reviewer.ID)
-	if err != nil && !issues_model.IsErrReviewNotExist(err) {
-		return err
-	}
+	assigneeCommentMap := make(map[int64]*issues_model.Comment)
+	assigneeRemovedCommentMap := make(map[int64]*issues_model.Comment)
+	assigneeRemoved := make(map[int64]*user_model.User)
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
+		// Delete all old assignees not passed.
+		toBeRemoved := toBeRemovedAssignees(issue, allNewAssignees)
 
-	var pemResult bool
-	if isAdd {
-		pemResult = permReviewer.CanAccessAny(perm.AccessModeRead, unit.TypePullRequests)
-		if !pemResult {
-			return issues_model.ErrNotValidReviewRequest{
-				Reason: "Reviewer can't read",
-				UserID: doer.ID,
-				RepoID: issue.Repo.ID,
-			}
-		}
-
-		if doer.ID == issue.PosterID && issue.OriginalAuthorID == 0 && lastreview != nil && lastreview.Type != issues_model.ReviewTypeRequest {
-			return nil
-		}
-
-		pemResult = doer.ID == issue.PosterID
-		if !pemResult {
-			pemResult = permDoer.CanAccessAny(perm.AccessModeWrite, unit.TypePullRequests)
-		}
-		if !pemResult {
-			pemResult, err = issues_model.IsOfficialReviewer(ctx, issue, doer)
+		for _, assignee := range toBeRemoved {
+			// This function also does comments and hooks, which is why we call it separately instead of directly removing the assignees here
+			removed, comment, err := ToggleAssignee(ctx, issue, doer, assignee)
 			if err != nil {
 				return err
 			}
-			if !pemResult {
-				return issues_model.ErrNotValidReviewRequest{
-					Reason: "Doer can't choose reviewer",
-					UserID: doer.ID,
-					RepoID: issue.Repo.ID,
-				}
+			if removed {
+				assigneeRemoved[assignee.ID] = assignee
+				assigneeRemovedCommentMap[assignee.ID] = comment
 			}
 		}
 
-		if reviewer.ID == issue.PosterID && issue.OriginalAuthorID == 0 {
-			return issues_model.ErrNotValidReviewRequest{
-				Reason: "poster of pr can't be reviewer",
-				UserID: doer.ID,
-				RepoID: issue.Repo.ID,
+		// Add all new assignees.
+		// Update the assignee. The function will check if the user exists, is already
+		// assigned (which he shouldn't as we deleted all assignees before) and
+		// has access to the repo.
+		for _, assignee := range allNewAssignees {
+			// Extra method to prevent double adding (which would result in removing).
+			comment, err := AddAssigneeIfNotAssigned(ctx, issue, doer, assignee)
+			if err != nil {
+				return err
 			}
-		}
-	} else {
-		if lastreview != nil && lastreview.Type == issues_model.ReviewTypeRequest && lastreview.ReviewerID == doer.ID {
-			return nil
+			assigneeCommentMap[assignee.ID] = comment
 		}
 
-		pemResult = permDoer.IsAdmin()
-		if !pemResult {
-			return issues_model.ErrNotValidReviewRequest{
-				Reason: "Doer is not admin",
-				UserID: doer.ID,
-				RepoID: issue.Repo.ID,
-			}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	for _, assignee := range assigneeRemoved {
+		notify_service.IssueChangeAssignee(ctx, doer, issue, assignee, true, assigneeRemovedCommentMap[assignee.ID])
+	}
+
+	for _, assignee := range allNewAssignees {
+		comment := assigneeCommentMap[assignee.ID]
+		if comment != nil {
+			notify_service.IssueChangeAssignee(ctx, doer, issue, assignee, false, comment)
 		}
 	}
 
 	return nil
 }
 
-// IsValidTeamReviewRequest Check permission for ReviewRequest Team
-func IsValidTeamReviewRequest(ctx context.Context, reviewer *organization.Team, doer *user_model.User, isAdd bool, issue *issues_model.Issue) error {
-	if doer.IsOrganization() {
-		return issues_model.ErrNotValidReviewRequest{
-			Reason: "Organization can't be doer to add reviewer",
-			UserID: doer.ID,
-			RepoID: issue.Repo.ID,
-		}
+func validateAssignee(ctx context.Context, issue *issues_model.Issue, doer, assignee *user_model.User) error {
+	if user_model.IsUserBlockedBy(ctx, doer, assignee.ID) {
+		return user_model.ErrBlockedUser
 	}
 
-	permission, err := access_model.GetUserRepoPermission(ctx, issue.Repo, doer)
+	valid, err := access_model.CanBeAssigned(ctx, assignee, issue.Repo)
 	if err != nil {
-		log.Error("Unable to GetUserRepoPermission for %-v in %-v#%d", doer, issue.Repo, issue.Index)
 		return err
 	}
-
-	if isAdd {
-		if issue.Repo.IsPrivate {
-			hasTeam := organization.HasTeamRepo(ctx, reviewer.OrgID, reviewer.ID, issue.RepoID)
-
-			if !hasTeam {
-				return issues_model.ErrNotValidReviewRequest{
-					Reason: "Reviewing team can't read repo",
-					UserID: doer.ID,
-					RepoID: issue.Repo.ID,
-				}
-			}
-		}
-
-		doerCanWrite := permission.CanAccessAny(perm.AccessModeWrite, unit.TypePullRequests)
-		if !doerCanWrite && doer.ID != issue.PosterID {
-			official, err := issues_model.IsOfficialReviewer(ctx, issue, doer)
-			if err != nil {
-				log.Error("Unable to Check if IsOfficialReviewer for %-v in %-v#%d", doer, issue.Repo, issue.Index)
-				return err
-			}
-			if !official {
-				return issues_model.ErrNotValidReviewRequest{
-					Reason: "Doer can't choose reviewer",
-					UserID: doer.ID,
-					RepoID: issue.Repo.ID,
-				}
-			}
-		}
-	} else if !permission.IsAdmin() {
-		return issues_model.ErrNotValidReviewRequest{
-			Reason: "Only admin users can remove team requests. Doer is not admin",
-			UserID: doer.ID,
-			RepoID: issue.Repo.ID,
-		}
+	if !valid {
+		return repo_model.ErrUserDoesNotHaveAccessToRepo{UserID: assignee.ID, RepoName: issue.Repo.Name}
 	}
 
 	return nil
 }
 
-// TeamReviewRequest add or remove a review request from a team for this PR, and make comment for it.
-func TeamReviewRequest(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, reviewer *organization.Team, isAdd bool) (comment *issues_model.Comment, err error) {
-	if isAdd {
-		comment, err = issues_model.AddTeamReviewRequest(ctx, issue, reviewer, doer)
-	} else {
-		comment, err = issues_model.RemoveTeamReviewRequest(ctx, issue, reviewer, doer)
-	}
-
+// AddAssigneeIfNotAssigned adds an assignee only if he isn't already assigned to the issue.
+// Also checks for access of assigned user
+func AddAssigneeIfNotAssigned(ctx context.Context, issue *issues_model.Issue, doer, assignee *user_model.User) (comment *issues_model.Comment, err error) {
+	// Check if the user is already assigned
+	isAssigned, err := issues_model.IsUserAssignedToIssue(ctx, issue, assignee.ID)
 	if err != nil {
 		return nil, err
 	}
-
-	if comment == nil || !isAdd {
-		return nil, nil
+	if isAssigned {
+		// nothing to do
+		return nil, nil //nolint:nilnil // return nil because the user is already assigned
 	}
 
-	// notify all user in this team
-	if err := comment.LoadIssue(ctx); err != nil {
+	if err := validateAssignee(ctx, issue, doer, assignee); err != nil {
 		return nil, err
 	}
 
-	members, err := organization.GetTeamMembers(ctx, &organization.SearchMembersOptions{
-		TeamID: reviewer.ID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	for _, member := range members {
-		if member.ID == comment.Issue.PosterID {
-			continue
-		}
-		comment.AssigneeID = member.ID
-		notify_service.PullRequestReviewRequest(ctx, doer, issue, member, isAdd, comment)
-	}
-
+	_, comment, err = issues_model.ToggleIssueAssignee(ctx, issue, doer, assignee.ID)
 	return comment, err
+}
+
+// AddAssignees adds multiple assignees to an issue atomically.
+func AddAssignees(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assigneeIDs []int64) error {
+	assigneeCommentMap := make(map[int64]*issues_model.Comment)
+	assignees := make(map[int64]*user_model.User)
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
+		for _, assigneeID := range assigneeIDs {
+			isAssigned, err := issues_model.IsUserAssignedToIssue(ctx, issue, assigneeID)
+			if err != nil {
+				return err
+			}
+			if isAssigned {
+				continue
+			}
+
+			assignee, err := user_model.GetUserByID(ctx, assigneeID)
+			if err != nil {
+				return err
+			}
+			if err := validateAssignee(ctx, issue, doer, assignee); err != nil {
+				return err
+			}
+
+			comment, err := AddAssigneeIfNotAssigned(ctx, issue, doer, assignee)
+			if err != nil {
+				return err
+			}
+			assignees[assigneeID] = assignee
+			assigneeCommentMap[assigneeID] = comment
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if len(assignees) > 0 {
+		for assigneeID, assignee := range assignees {
+			notify_service.IssueChangeAssignee(ctx, doer, issue, assignee, false, assigneeCommentMap[assigneeID])
+		}
+	}
+	return nil
+}
+
+// RemoveAssignees removes multiple assignees from an issue atomically.
+func RemoveAssignees(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assigneeIDs []int64) error {
+	assigneeCommentMap := make(map[int64]*issues_model.Comment)
+	assignees := make(map[int64]*user_model.User)
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
+		for _, assigneeID := range assigneeIDs {
+			isAssigned, err := issues_model.IsUserAssignedToIssue(ctx, issue, assigneeID)
+			if err != nil {
+				return err
+			}
+			if !isAssigned {
+				continue
+			}
+			removed, comment, err := issues_model.ToggleIssueAssignee(ctx, issue, doer, assigneeID)
+			if err != nil {
+				return err
+			}
+			if removed {
+				assignee, err := user_model.GetUserByID(ctx, assigneeID)
+				if err != nil {
+					return err
+				}
+				assignees[assigneeID] = assignee
+				assigneeCommentMap[assigneeID] = comment
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if len(assignees) > 0 {
+		for assigneeID, assignee := range assignees {
+			notify_service.IssueChangeAssignee(ctx, doer, issue, assignee, true, assigneeCommentMap[assigneeID])
+		}
+	}
+	return nil
 }

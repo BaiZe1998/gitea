@@ -12,19 +12,21 @@ import (
 	"strings"
 	"time"
 
-	activities_model "code.gitea.io/gitea/models/activities"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/modules/git"
-	giturl "code.gitea.io/gitea/modules/git/url"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/repository"
-	"code.gitea.io/gitea/modules/svg"
+	activities_model "gitea.dev/models/activities"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/htmlutil"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/repository"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/svg"
 
 	"github.com/editorconfig/editorconfig-core-go/v2"
 )
 
-func SortArrow(normSort, revSort, urlSort string, isDefault bool) template.HTML {
+func sortArrow(normSort, revSort, urlSort string, isDefault bool) template.HTML {
 	// if needed
 	if len(normSort) == 0 || len(urlSort) == 0 {
 		return ""
@@ -38,21 +40,17 @@ func SortArrow(normSort, revSort, urlSort string, isDefault bool) template.HTML 
 	} else {
 		// if sort arg is in url test if it correlates with column header sort arguments
 		// the direction of the arrow should indicate the "current sort order", up means ASC(normal), down means DESC(rev)
-		if urlSort == normSort {
+		switch urlSort {
+		case normSort:
 			// the table is sorted with this header normal
 			return svg.RenderHTML("octicon-triangle-up", 16)
-		} else if urlSort == revSort {
+		case revSort:
 			// the table is sorted with this header reverse
 			return svg.RenderHTML("octicon-triangle-down", 16)
 		}
 	}
 	// the table is NOT sorted with this header
 	return ""
-}
-
-// IsMultilineCommitMessage checks to see if a commit message contains multiple lines.
-func IsMultilineCommitMessage(msg string) bool {
-	return strings.Count(strings.TrimSpace(msg), "\n") >= 1
 }
 
 // Actioner describes an action
@@ -69,8 +67,8 @@ type Actioner interface {
 	GetIssueInfos() []string
 }
 
-// ActionIcon accepts an action operation type and returns an icon class name.
-func ActionIcon(opType activities_model.ActionType) string {
+// actionIcon accepts an action operation type and returns an icon class name.
+func actionIcon(opType activities_model.ActionType) string {
 	switch opType {
 	case activities_model.ActionCreateRepo, activities_model.ActionTransferRepo, activities_model.ActionRenameRepo:
 		return "repo"
@@ -126,8 +124,8 @@ func ActionContent2Commits(act Actioner) *repository.PushCommits {
 	return push
 }
 
-// MigrationIcon returns a SVG name matching the service an issue/comment was migrated from
-func MigrationIcon(hostname string) string {
+// migrationIcon returns a SVG name matching the service an issue/comment was migrated from
+func migrationIcon(hostname string) string {
 	switch hostname {
 	case "github.com":
 		return "octicon-mark-github"
@@ -142,43 +140,49 @@ type remoteAddress struct {
 	Password string
 }
 
-func mirrorRemoteAddress(ctx context.Context, m *repo_model.Repository, remoteName string, ignoreOriginalURL bool) remoteAddress {
-	a := remoteAddress{}
-
-	remoteURL := m.OriginalURL
-	if ignoreOriginalURL || remoteURL == "" {
-		var err error
-		remoteURL, err = git.GetRemoteAddress(ctx, m.RepoPath(), remoteName)
-		if err != nil {
-			log.Error("GetRemoteURL %v", err)
-			return a
-		}
-	}
-
-	u, err := giturl.Parse(remoteURL)
+func mirrorRemoteAddress(ctx context.Context, m *repo_model.Repository, remoteName string) remoteAddress {
+	ret := remoteAddress{}
+	u, err := git.ParseRemoteAddressURL(ctx, m, remoteName)
 	if err != nil {
-		log.Error("giturl.Parse %v", err)
-		return a
+		log.Error("GetRemoteURL %v", err)
+		return ret
 	}
 
 	if u.Scheme != "ssh" && u.Scheme != "file" {
 		if u.User != nil {
-			a.Username = u.User.Username()
-			a.Password, _ = u.User.Password()
+			ret.Username = u.User.Username()
+			ret.Password, _ = u.User.Password()
 		}
-		u.User = nil
 	}
-	a.Address = u.String()
 
-	return a
+	// The URL stored in the git repo could contain authentication,
+	// erase it, or it will be shown in the UI.
+	u.User = nil
+	ret.Address = u.String()
+	// Why not use m.OriginalURL to set ret.Address?
+	// It should be OK to use it, since m.OriginalURL should be the same as the authentication-erased URL from the Git repository.
+	// However, the old code has already stored authentication in m.OriginalURL when updating mirror settings.
+	// That means we need to use "giturl.Parse" for m.OriginalURL again to ensure authentication is erased.
+	// Instead of doing this, why not directly use the authentication-erased URL from the Git repository?
+	// It should be the same as long as there are no bugs.
+
+	return ret
 }
 
-func FilenameIsImage(filename string) bool {
+// UserTypeLabel marks a bot account next to a name built in Go, the template equivalent is shared/user/user_type_label
+func (ut *RenderUtils) UserTypeLabel(u *user_model.User) template.HTML {
+	if u == nil || !u.IsTypeBot() {
+		return ""
+	}
+	return htmlutil.HTMLFormat(` <span class="ui basic label tw-py-0 tw-align-baseline">%s</span>`, ut.locale().TrString("concept_user_bot"))
+}
+
+func filenameIsImage(filename string) bool {
 	mimeType := mime.TypeByExtension(filepath.Ext(filename))
 	return strings.HasPrefix(mimeType, "image/")
 }
 
-func TabSizeClass(ec *editorconfig.Editorconfig, filename string) string {
+func tabSizeClass(ec *editorconfig.Editorconfig, filename string) string {
 	if ec != nil {
 		def, err := ec.GetDefinitionForFilename(filename)
 		if err == nil && def.TabWidth >= 1 && def.TabWidth <= 16 {
@@ -186,4 +190,50 @@ func TabSizeClass(ec *editorconfig.Editorconfig, filename string) string {
 		}
 	}
 	return "tab-size-4"
+}
+
+type MiscUtils struct {
+	ctx context.Context
+}
+
+func NewMiscUtils(ctx context.Context) *MiscUtils {
+	return &MiscUtils{ctx: ctx}
+}
+
+type MarkdownEditorContext struct {
+	PreviewMode    string // "comment", "wiki", or empty for general
+	PreviewContext string // the path for resolving the links in the preview (repo preview already has default correct value)
+	PreviewLink    string
+	MentionsLink   string
+}
+
+func (m *MiscUtils) MarkdownEditorComment(repo *repo_model.Repository) *MarkdownEditorContext {
+	if repo == nil {
+		return nil
+	}
+	return &MarkdownEditorContext{
+		PreviewMode:  "comment",
+		PreviewLink:  repo.Link() + "/markup",
+		MentionsLink: repo.Link() + "/-/mentions-in-repo",
+	}
+}
+
+func (m *MiscUtils) MarkdownEditorWiki(repo *repo_model.Repository) *MarkdownEditorContext {
+	if repo == nil {
+		return nil
+	}
+	return &MarkdownEditorContext{
+		PreviewMode:  "wiki",
+		PreviewLink:  repo.Link() + "/markup",
+		MentionsLink: repo.Link() + "/-/mentions-in-repo",
+	}
+}
+
+func (m *MiscUtils) MarkdownEditorGeneral(owner *user_model.User) *MarkdownEditorContext {
+	ret := &MarkdownEditorContext{PreviewLink: setting.AppSubURL + "/-/markup"}
+	if owner != nil {
+		ret.PreviewContext = owner.HomeLink()
+		ret.MentionsLink = owner.HomeLink() + "/-/mentions-in-owner"
+	}
+	return ret
 }

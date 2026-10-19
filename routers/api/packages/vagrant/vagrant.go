@@ -4,6 +4,7 @@
 package vagrant
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,26 +12,26 @@ import (
 	"sort"
 	"strings"
 
-	packages_model "code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/modules/context"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	vagrant_module "code.gitea.io/gitea/modules/packages/vagrant"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	packages_service "code.gitea.io/gitea/services/packages"
+	packages_model "gitea.dev/models/packages"
+	packages_module "gitea.dev/modules/packages"
+	vagrant_module "gitea.dev/modules/packages/vagrant"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	packages_service "gitea.dev/services/packages"
 
 	"github.com/hashicorp/go-version"
 )
 
 func apiError(ctx *context.Context, status int, obj any) {
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		ctx.JSON(status, struct {
-			Errors []string `json:"errors"`
-		}{
-			Errors: []string{
-				message,
-			},
-		})
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	ctx.JSON(status, struct {
+		Errors []string `json:"errors"`
+	}{
+		Errors: []string{
+			message,
+		},
 	})
 }
 
@@ -44,7 +45,7 @@ func CheckAuthenticate(ctx *context.Context) {
 }
 
 func CheckBoxAvailable(ctx *context.Context) {
-	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeVagrant, ctx.Params("name"))
+	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeVagrant, ctx.PathParam("name"))
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
@@ -101,7 +102,7 @@ func packageDescriptorToMetadata(baseURL string, pd *packages_model.PackageDescr
 }
 
 func EnumeratePackageVersions(ctx *context.Context) {
-	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeVagrant, ctx.Params("name"))
+	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeVagrant, ctx.PathParam("name"))
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
@@ -130,20 +131,20 @@ func EnumeratePackageVersions(ctx *context.Context) {
 
 	ctx.JSON(http.StatusOK, &packageMetadata{
 		Name:        pds[0].Package.Name,
-		Description: pds[len(pds)-1].Metadata.(*vagrant_module.Metadata).Description,
+		Description: packages_model.DescriptorMetadata[*vagrant_module.Metadata](pds[len(pds)-1]).Description,
 		Versions:    versions,
 	})
 }
 
 func UploadPackageFile(ctx *context.Context) {
-	boxName := ctx.Params("name")
-	boxVersion := ctx.Params("version")
+	boxName := ctx.PathParam("name")
+	boxVersion := ctx.PathParam("version")
 	_, err := version.NewSemver(boxVersion)
 	if err != nil {
 		apiError(ctx, http.StatusBadRequest, err)
 		return
 	}
-	boxProvider := ctx.Params("provider")
+	boxProvider := ctx.PathParam("provider")
 	if !strings.HasSuffix(boxProvider, ".box") {
 		apiError(ctx, http.StatusBadRequest, err)
 		return
@@ -167,7 +168,11 @@ func UploadPackageFile(ctx *context.Context) {
 
 	metadata, err := vagrant_module.ParseMetadataFromBox(buf)
 	if err != nil {
-		apiError(ctx, http.StatusInternalServerError, err)
+		if errors.Is(err, util.ErrInvalidArgument) {
+			apiError(ctx, http.StatusBadRequest, err)
+		} else {
+			apiError(ctx, http.StatusInternalServerError, err)
+		}
 		return
 	}
 
@@ -217,24 +222,21 @@ func UploadPackageFile(ctx *context.Context) {
 }
 
 func DownloadPackageFile(ctx *context.Context) {
-	s, u, pf, err := packages_service.GetFileStreamByPackageNameAndVersion(
+	s, u, pf, err := packages_service.OpenFileForDownloadByPackageNameAndVersion(
 		ctx,
 		&packages_service.PackageInfo{
 			Owner:       ctx.Package.Owner,
 			PackageType: packages_model.TypeVagrant,
-			Name:        ctx.Params("name"),
-			Version:     ctx.Params("version"),
+			Name:        ctx.PathParam("name"),
+			Version:     ctx.PathParam("version"),
 		},
 		&packages_service.PackageFileInfo{
-			Filename: ctx.Params("provider"),
+			Filename: ctx.PathParam("provider"),
 		},
+		ctx.Req.Method,
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist || err == packages_model.ErrPackageFileNotExist {
-			apiError(ctx, http.StatusNotFound, err)
-			return
-		}
-		apiError(ctx, http.StatusInternalServerError, err)
+		apiError(ctx, helper.PackageErrorStatus(err), err)
 		return
 	}
 

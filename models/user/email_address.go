@@ -7,61 +7,19 @@ package user
 import (
 	"context"
 	"fmt"
-	"net/mail"
-	"regexp"
 	"strings"
+	"time"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/modules/validation"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/base"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/validation"
 
 	"xorm.io/builder"
 )
-
-// ErrEmailNotActivated e-mail address has not been activated error
-var ErrEmailNotActivated = util.NewInvalidArgumentErrorf("e-mail address has not been activated")
-
-// ErrEmailCharIsNotSupported e-mail address contains unsupported character
-type ErrEmailCharIsNotSupported struct {
-	Email string
-}
-
-// IsErrEmailCharIsNotSupported checks if an error is an ErrEmailCharIsNotSupported
-func IsErrEmailCharIsNotSupported(err error) bool {
-	_, ok := err.(ErrEmailCharIsNotSupported)
-	return ok
-}
-
-func (err ErrEmailCharIsNotSupported) Error() string {
-	return fmt.Sprintf("e-mail address contains unsupported character [email: %s]", err.Email)
-}
-
-func (err ErrEmailCharIsNotSupported) Unwrap() error {
-	return util.ErrInvalidArgument
-}
-
-// ErrEmailInvalid represents an error where the email address does not comply with RFC 5322
-// or has a leading '-' character
-type ErrEmailInvalid struct {
-	Email string
-}
-
-// IsErrEmailInvalid checks if an error is an ErrEmailInvalid
-func IsErrEmailInvalid(err error) bool {
-	_, ok := err.(ErrEmailInvalid)
-	return ok
-}
-
-func (err ErrEmailInvalid) Error() string {
-	return fmt.Sprintf("e-mail invalid [email: %s]", err.Email)
-}
-
-func (err ErrEmailInvalid) Unwrap() error {
-	return util.ErrInvalidArgument
-}
 
 // ErrEmailAlreadyUsed represents a "EmailAlreadyUsed" kind of error.
 type ErrEmailAlreadyUsed struct {
@@ -142,39 +100,71 @@ func (email *EmailAddress) BeforeInsert() {
 	}
 }
 
-var emailRegexp = regexp.MustCompile("^[a-zA-Z0-9.!#$%&'*+-/=?^_`{|}~]*@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
+func InsertEmailAddress(ctx context.Context, email *EmailAddress) (*EmailAddress, error) {
+	if err := db.Insert(ctx, email); err != nil {
+		return nil, err
+	}
+	return email, nil
+}
 
-// ValidateEmail check if email is a allowed address
+type ErrEmailInvalid string
+
+func (err ErrEmailInvalid) Error() string {
+	return string(err)
+}
+
+func (err ErrEmailInvalid) Unwrap() error {
+	return util.ErrInvalidArgument
+}
+
+// ValidateEmail check if email is a valid & allowed address
 func ValidateEmail(email string) error {
-	if len(email) == 0 {
-		return nil
+	if !validation.IsEmailAddressValid(email) {
+		return ErrEmailInvalid("email address is invalid: " + email)
 	}
-
-	if !emailRegexp.MatchString(email) {
-		return ErrEmailCharIsNotSupported{email}
+	if !IsEmailDomainAllowed(email) {
+		return ErrEmailInvalid("email domain is not allowed: " + email)
 	}
-
-	if email[0] == '-' {
-		return ErrEmailInvalid{email}
-	}
-
-	if _, err := mail.ParseAddress(email); err != nil {
-		return ErrEmailInvalid{email}
-	}
-
-	// if there is no allow list, then check email against block list
-	if len(setting.Service.EmailDomainAllowList) == 0 &&
-		validation.IsEmailDomainListed(setting.Service.EmailDomainBlockList, email) {
-		return ErrEmailInvalid{email}
-	}
-
-	// if there is an allow list, then check email against allow list
-	if len(setting.Service.EmailDomainAllowList) > 0 &&
-		!validation.IsEmailDomainListed(setting.Service.EmailDomainAllowList, email) {
-		return ErrEmailInvalid{email}
-	}
-
 	return nil
+}
+
+// ValidateEmailForAdmin check if email is a valid address when admins manually add or edit users
+func ValidateEmailForAdmin(email string) error {
+	// In this case we do not need to check the email domain
+	if !validation.IsEmailAddressValid(email) {
+		return ErrEmailInvalid("email address is invalid: " + email)
+	}
+	return nil
+}
+
+func GetEmailAddressByEmail(ctx context.Context, email string) (*EmailAddress, error) {
+	ea := &EmailAddress{}
+	if has, err := db.GetEngine(ctx).Where("lower_email=?", strings.ToLower(email)).Get(ea); err != nil {
+		return nil, err
+	} else if !has {
+		return nil, ErrEmailAddressNotExist{email}
+	}
+	return ea, nil
+}
+
+func GetEmailAddressOfUser(ctx context.Context, email string, uid int64) (*EmailAddress, error) {
+	ea := &EmailAddress{}
+	if has, err := db.GetEngine(ctx).Where("lower_email=? AND uid=?", strings.ToLower(email), uid).Get(ea); err != nil {
+		return nil, err
+	} else if !has {
+		return nil, ErrEmailAddressNotExist{email}
+	}
+	return ea, nil
+}
+
+func GetPrimaryEmailAddressOfUser(ctx context.Context, uid int64) (*EmailAddress, error) {
+	ea := &EmailAddress{}
+	if has, err := db.GetEngine(ctx).Where("uid=? AND is_primary=?", uid, true).Get(ea); err != nil {
+		return nil, err
+	} else if !has {
+		return nil, ErrEmailAddressNotExist{}
+	}
+	return ea, nil
 }
 
 // GetEmailAddresses returns all email addresses belongs to given user.
@@ -196,7 +186,7 @@ func GetEmailAddressByID(ctx context.Context, uid, id int64) (*EmailAddress, err
 	if has, err := db.GetEngine(ctx).ID(id).Get(email); err != nil {
 		return nil, err
 	} else if !has {
-		return nil, nil
+		return nil, nil //nolint:nilnil // return nil to indicate that the object does not exist
 	}
 	return email, nil
 }
@@ -235,110 +225,11 @@ func IsEmailUsed(ctx context.Context, email string) (bool, error) {
 	return db.GetEngine(ctx).Where("lower_email=?", strings.ToLower(email)).Get(&EmailAddress{})
 }
 
-// AddEmailAddress adds an email address to given user.
-func AddEmailAddress(ctx context.Context, email *EmailAddress) error {
-	email.Email = strings.TrimSpace(email.Email)
-	used, err := IsEmailUsed(ctx, email.Email)
-	if err != nil {
-		return err
-	} else if used {
-		return ErrEmailAlreadyUsed{email.Email}
-	}
-
-	if err = ValidateEmail(email.Email); err != nil {
-		return err
-	}
-
-	return db.Insert(ctx, email)
-}
-
-// AddEmailAddresses adds an email address to given user.
-func AddEmailAddresses(ctx context.Context, emails []*EmailAddress) error {
-	if len(emails) == 0 {
-		return nil
-	}
-
-	// Check if any of them has been used
-	for i := range emails {
-		emails[i].Email = strings.TrimSpace(emails[i].Email)
-		used, err := IsEmailUsed(ctx, emails[i].Email)
-		if err != nil {
-			return err
-		} else if used {
-			return ErrEmailAlreadyUsed{emails[i].Email}
-		}
-		if err = ValidateEmail(emails[i].Email); err != nil {
-			return err
-		}
-	}
-
-	if err := db.Insert(ctx, emails); err != nil {
-		return fmt.Errorf("Insert: %w", err)
-	}
-
-	return nil
-}
-
-// DeleteEmailAddress deletes an email address of given user.
-func DeleteEmailAddress(ctx context.Context, email *EmailAddress) (err error) {
-	if email.IsPrimary {
-		return ErrPrimaryEmailCannotDelete{Email: email.Email}
-	}
-
-	var deleted int64
-	// ask to check UID
-	address := EmailAddress{
-		UID: email.UID,
-	}
-	if email.ID > 0 {
-		deleted, err = db.GetEngine(ctx).ID(email.ID).Delete(&address)
-	} else {
-		if email.Email != "" && email.LowerEmail == "" {
-			email.LowerEmail = strings.ToLower(email.Email)
-		}
-		deleted, err = db.GetEngine(ctx).
-			Where("lower_email=?", email.LowerEmail).
-			Delete(&address)
-	}
-
-	if err != nil {
-		return err
-	} else if deleted != 1 {
-		return ErrEmailAddressNotExist{Email: email.Email}
-	}
-	return nil
-}
-
-// DeleteEmailAddresses deletes multiple email addresses
-func DeleteEmailAddresses(ctx context.Context, emails []*EmailAddress) (err error) {
-	for i := range emails {
-		if err = DeleteEmailAddress(ctx, emails[i]); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// DeleteInactiveEmailAddresses deletes inactive email addresses
-func DeleteInactiveEmailAddresses(ctx context.Context) error {
-	_, err := db.GetEngine(ctx).
-		Where("is_activated = ?", false).
-		Delete(new(EmailAddress))
-	return err
-}
-
 // ActivateEmail activates the email address to given user.
 func ActivateEmail(ctx context.Context, email *EmailAddress) error {
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
-	if err := updateActivation(ctx, email, true); err != nil {
-		return err
-	}
-	return committer.Commit()
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		return updateActivation(ctx, email, true)
+	})
 }
 
 func updateActivation(ctx context.Context, email *EmailAddress, activate bool) error {
@@ -356,72 +247,85 @@ func updateActivation(ctx context.Context, email *EmailAddress, activate bool) e
 	return UpdateUserCols(ctx, user, "rands")
 }
 
-// MakeEmailPrimary sets primary email address of given user.
-func MakeEmailPrimary(ctx context.Context, email *EmailAddress) error {
-	has, err := db.GetEngine(ctx).Get(email)
-	if err != nil {
+func MakeActiveEmailPrimary(ctx context.Context, ownerID, emailID int64) error {
+	return makeEmailPrimaryInternal(ctx, ownerID, emailID, true)
+}
+
+func MakeInactiveEmailPrimary(ctx context.Context, ownerID, emailID int64) error {
+	return makeEmailPrimaryInternal(ctx, ownerID, emailID, false)
+}
+
+func makeEmailPrimaryInternal(ctx context.Context, ownerID, emailID int64, isActive bool) error {
+	email := &EmailAddress{}
+	if has, err := db.GetEngine(ctx).ID(emailID).
+		Where(builder.Eq{
+			"uid":          ownerID,
+			"is_activated": isActive,
+		}).
+		Get(email); err != nil {
 		return err
 	} else if !has {
-		return ErrEmailAddressNotExist{Email: email.Email}
-	}
-
-	if !email.IsActivated {
-		return ErrEmailNotActivated
+		return ErrEmailAddressNotExist{}
 	}
 
 	user := &User{}
-	has, err = db.GetEngine(ctx).ID(email.UID).Get(user)
-	if err != nil {
+	if has, err := db.GetEngine(ctx).ID(email.UID).Get(user); err != nil {
 		return err
 	} else if !has {
-		return ErrUserNotExist{
-			UID:   email.UID,
-			Name:  "",
-			KeyID: 0,
+		return ErrUserNotExist{UID: email.UID}
+	}
+
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		sess := db.GetEngine(ctx)
+
+		// 1. Update user table
+		user.Email = email.Email
+		if _, err := sess.ID(user.ID).Cols("email").Update(user); err != nil {
+			return err
 		}
-	}
 
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
-	sess := db.GetEngine(ctx)
+		// 2. Update old primary email
+		if _, err := sess.Where("uid=? AND is_primary=?", email.UID, true).Cols("is_primary").Update(&EmailAddress{
+			IsPrimary: false,
+		}); err != nil {
+			return err
+		}
 
-	// 1. Update user table
-	user.Email = email.Email
-	if _, err = sess.ID(user.ID).Cols("email").Update(user); err != nil {
-		return err
-	}
+		// 3. update new primary email
+		email.IsPrimary = true
+		if _, err := sess.ID(email.ID).Cols("is_primary").Update(email); err != nil {
+			return err
+		}
 
-	// 2. Update old primary email
-	if _, err = sess.Where("uid=? AND is_primary=?", email.UID, true).Cols("is_primary").Update(&EmailAddress{
-		IsPrimary: false,
-	}); err != nil {
-		return err
-	}
+		return nil
+	})
+}
 
-	// 3. update new primary email
-	email.IsPrimary = true
-	if _, err = sess.ID(email.ID).Cols("is_primary").Update(email); err != nil {
-		return err
-	}
-
-	return committer.Commit()
+// ChangeInactivePrimaryEmail replaces the inactive primary email of a given user
+func ChangeInactivePrimaryEmail(ctx context.Context, uid int64, oldEmailAddr, newEmailAddr string) error {
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		_, err := db.GetEngine(ctx).Where(builder.Eq{"uid": uid, "lower_email": strings.ToLower(oldEmailAddr)}).Delete(&EmailAddress{})
+		if err != nil {
+			return err
+		}
+		newEmail, err := InsertEmailAddress(ctx, &EmailAddress{UID: uid, Email: newEmailAddr})
+		if err != nil {
+			return err
+		}
+		return MakeInactiveEmailPrimary(ctx, uid, newEmail.ID)
+	})
 }
 
 // VerifyActiveEmailCode verifies active email code when active account
 func VerifyActiveEmailCode(ctx context.Context, code, email string) *EmailAddress {
-	minutes := setting.Service.ActiveCodeLives
-
 	if user := GetVerifyUser(ctx, code); user != nil {
 		// time limit code
 		prefix := code[:base.TimeLimitCodeLength]
-		data := fmt.Sprintf("%d%s%s%s%s", user.ID, email, user.LowerName, user.Passwd, user.Rands)
-
-		if base.VerifyTimeLimitCode(data, minutes, prefix) {
-			emailAddress := &EmailAddress{UID: user.ID, Email: email}
-			if has, _ := db.GetEngine(ctx).Get(emailAddress); has {
+		opts := &TimeLimitCodeOptions{Purpose: TimeLimitCodeActivateEmail, NewEmail: email}
+		data := makeTimeLimitCodeHashData(opts, user)
+		if base.VerifyTimeLimitCode(time.Now(), data, setting.Service.ActiveCodeLives, prefix) {
+			emailAddress, has, _ := db.Get[EmailAddress](ctx, builder.Eq{"uid": user.ID, "email": email})
+			if has {
 				return emailAddress
 			}
 		}
@@ -449,12 +353,13 @@ type SearchEmailOptions struct {
 	db.ListOptions
 	Keyword     string
 	SortType    SearchEmailOrderBy
-	IsPrimary   util.OptionalBool
-	IsActivated util.OptionalBool
+	IsPrimary   optional.Option[bool]
+	IsActivated optional.Option[bool]
 }
 
 // SearchEmailResult is an e-mail address found in the user or email_address table
 type SearchEmailResult struct {
+	ID          int64
 	UID         int64
 	Email       string
 	IsActivated bool
@@ -477,21 +382,15 @@ func SearchEmails(ctx context.Context, opts *SearchEmailOptions) ([]*SearchEmail
 		))
 	}
 
-	switch {
-	case opts.IsPrimary.IsTrue():
-		cond = cond.And(builder.Eq{"email_address.is_primary": true})
-	case opts.IsPrimary.IsFalse():
-		cond = cond.And(builder.Eq{"email_address.is_primary": false})
+	if opts.IsPrimary.Has() {
+		cond = cond.And(builder.Eq{"email_address.is_primary": opts.IsPrimary.Value()})
 	}
 
-	switch {
-	case opts.IsActivated.IsTrue():
-		cond = cond.And(builder.Eq{"email_address.is_activated": true})
-	case opts.IsActivated.IsFalse():
-		cond = cond.And(builder.Eq{"email_address.is_activated": false})
+	if opts.IsActivated.Has() {
+		cond = cond.And(builder.Eq{"email_address.is_activated": opts.IsActivated.Value()})
 	}
 
-	count, err := db.GetEngine(ctx).Join("INNER", "`user`", "`user`.ID = email_address.uid").
+	count, err := db.GetEngine(ctx).Join("INNER", "`user`", "`user`.id = email_address.uid").
 		Where(cond).Count(new(EmailAddress))
 	if err != nil {
 		return nil, 0, fmt.Errorf("Count: %w", err)
@@ -507,7 +406,7 @@ func SearchEmails(ctx context.Context, opts *SearchEmailOptions) ([]*SearchEmail
 	emails := make([]*SearchEmailResult, 0, opts.PageSize)
 	err = db.GetEngine(ctx).Table("email_address").
 		Select("email_address.*, `user`.name, `user`.full_name").
-		Join("INNER", "`user`", "`user`.ID = email_address.uid").
+		Join("INNER", "`user`", "`user`.id = email_address.uid").
 		Where(cond).
 		OrderBy(orderby).
 		Limit(opts.PageSize, (opts.Page-1)*opts.PageSize).
@@ -519,56 +418,73 @@ func SearchEmails(ctx context.Context, opts *SearchEmailOptions) ([]*SearchEmail
 // ActivateUserEmail will change the activated state of an email address,
 // either primary or secondary (all in the email_address table)
 func ActivateUserEmail(ctx context.Context, userID int64, email string, activate bool) (err error) {
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
-
-	// Activate/deactivate a user's secondary email address
-	// First check if there's another user active with the same address
-	addr, exist, err := db.Get[EmailAddress](ctx, builder.Eq{"uid": userID, "lower_email": strings.ToLower(email)})
-	if err != nil {
-		return err
-	} else if !exist {
-		return fmt.Errorf("no such email: %d (%s)", userID, email)
-	}
-
-	if addr.IsActivated == activate {
-		// Already in the desired state; no action
-		return nil
-	}
-	if activate {
-		if used, err := IsEmailActive(ctx, email, addr.ID); err != nil {
-			return fmt.Errorf("unable to check isEmailActive() for %s: %w", email, err)
-		} else if used {
-			return ErrEmailAlreadyUsed{Email: email}
-		}
-	}
-	if err = updateActivation(ctx, addr, activate); err != nil {
-		return fmt.Errorf("unable to updateActivation() for %d:%s: %w", addr.ID, addr.Email, err)
-	}
-
-	// Activate/deactivate a user's primary email address and account
-	if addr.IsPrimary {
-		user, exist, err := db.Get[User](ctx, builder.Eq{"id": userID, "email": email})
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		// Activate/deactivate a user's secondary email address
+		// First check if there's another user active with the same address
+		addr, exist, err := db.Get[EmailAddress](ctx, builder.Eq{"uid": userID, "lower_email": strings.ToLower(email)})
 		if err != nil {
 			return err
 		} else if !exist {
-			return fmt.Errorf("no user with ID: %d and Email: %s", userID, email)
+			return fmt.Errorf("no such email: %d (%s)", userID, email)
 		}
 
-		// The user's activation state should be synchronized with the primary email
-		if user.IsActive != activate {
-			user.IsActive = activate
-			if user.Rands, err = GetUserSalt(); err != nil {
-				return fmt.Errorf("unable to generate salt: %w", err)
-			}
-			if err = UpdateUserCols(ctx, user, "is_active", "rands"); err != nil {
-				return fmt.Errorf("unable to updateUserCols() for user ID: %d: %w", userID, err)
+		if addr.IsActivated == activate {
+			// Already in the desired state; no action
+			return nil
+		}
+		if activate {
+			if used, err := IsEmailActive(ctx, email, addr.ID); err != nil {
+				return fmt.Errorf("unable to check isEmailActive() for %s: %w", email, err)
+			} else if used {
+				return ErrEmailAlreadyUsed{Email: email}
 			}
 		}
+		if err = updateActivation(ctx, addr, activate); err != nil {
+			return fmt.Errorf("unable to updateActivation() for %d:%s: %w", addr.ID, addr.Email, err)
+		}
+
+		// Activate/deactivate a user's primary email address and account
+		if addr.IsPrimary {
+			user, exist, err := db.Get[User](ctx, builder.Eq{"id": userID})
+			if err != nil {
+				return err
+			} else if !exist || !strings.EqualFold(user.Email, email) {
+				return fmt.Errorf("no user with ID: %d and Email: %s", userID, email)
+			}
+
+			// The user's activation state should be synchronized with the primary email
+			if user.IsActive != activate {
+				user.IsActive = activate
+				if user.Rands, err = GetUserSalt(); err != nil {
+					return fmt.Errorf("unable to generate salt: %w", err)
+				}
+				if err = UpdateUserCols(ctx, user, "is_active", "rands"); err != nil {
+					return fmt.Errorf("unable to updateUserCols() for user ID: %d: %w", userID, err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func IsEmailDomainAllowed(email string) bool {
+	localPart, _, _ := strings.CutLast(email, "@")
+	if strings.ContainsAny(localPart, "%!") && (len(setting.Service.EmailDomainAllowList) > 0 || len(setting.Service.EmailDomainBlockList) > 0) {
+		return false // percent-hack and bang-path local parts can route mail to a domain other than the listed one
+	}
+	if len(setting.Service.EmailDomainAllowList) == 0 {
+		return !validation.IsEmailDomainListed(setting.Service.EmailDomainBlockList, email)
 	}
 
-	return committer.Commit()
+	return validation.IsEmailDomainListed(setting.Service.EmailDomainAllowList, email)
+}
+
+func GetActivatedEmailAddresses(ctx context.Context, uid int64) ([]string, error) {
+	emails := make([]string, 0, 2)
+	if err := db.GetEngine(ctx).Table("email_address").Select("email").
+		Where("uid=? AND is_activated=?", uid, true).Asc("id").
+		Find(&emails); err != nil {
+		return nil, err
+	}
+	return emails, nil
 }

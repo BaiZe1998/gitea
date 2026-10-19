@@ -10,41 +10,39 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/models"
-	asymkey_model "code.gitea.io/gitea/models/asymkey"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/organization"
-	packages_model "code.gitea.io/gitea/models/packages"
-	repo_model "code.gitea.io/gitea/models/repo"
-	system_model "code.gitea.io/gitea/models/system"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/eventsource"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/storage"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/services/agit"
-	org_service "code.gitea.io/gitea/services/org"
-	"code.gitea.io/gitea/services/packages"
-	container_service "code.gitea.io/gitea/services/packages/container"
-	repo_service "code.gitea.io/gitea/services/repository"
+	audit_model "gitea.dev/models/audit"
+	"gitea.dev/models/db"
+	"gitea.dev/models/organization"
+	packages_model "gitea.dev/models/packages"
+	repo_model "gitea.dev/models/repo"
+	system_model "gitea.dev/models/system"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git/gitrepo"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/storage"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	"gitea.dev/services/agit"
+	asymkey_service "gitea.dev/services/asymkey"
+	"gitea.dev/services/audit"
+	org_service "gitea.dev/services/org"
+	"gitea.dev/services/packages"
+	container_service "gitea.dev/services/packages/container"
+	repo_service "gitea.dev/services/repository"
+	websocket_service "gitea.dev/services/websocket"
 )
 
 // RenameUser renames a user
-func RenameUser(ctx context.Context, u *user_model.User, newUserName string) error {
-	// Non-local users are not allowed to change their username.
-	if !u.IsOrganization() && !u.IsLocal() {
-		return user_model.ErrUserIsNotLocal{
-			UID:  u.ID,
-			Name: u.Name,
-		}
+func RenameUser(ctx context.Context, u *user_model.User, newUserName string, doer *user_model.User) error {
+	if newUserName == u.Name {
+		return nil
 	}
 
-	if newUserName == u.Name {
-		return user_model.ErrUsernameNotChanged{
-			UID:  u.ID,
-			Name: u.Name,
-		}
+	// Non-local users are not allowed to change their own username, but admins are
+	isExternalUser := !u.IsOrganization() && !u.IsLocal()
+	if isExternalUser && !doer.IsAdmin {
+		return user_model.ErrUserIsNotLocal{UID: u.ID, Name: u.Name}
 	}
 
 	if err := user_model.IsUsableUsername(newUserName); err != nil {
@@ -60,7 +58,13 @@ func RenameUser(ctx context.Context, u *user_model.User, newUserName string) err
 			u.Name = oldUserName
 			return err
 		}
-		return repo_model.UpdateRepositoryOwnerNames(ctx, u.ID, newUserName)
+		if err := repo_model.UpdateRepositoryOwnerNames(ctx, u.ID, newUserName); err != nil {
+			return err
+		}
+
+		recordNameChange(ctx, u, oldUserName)
+
+		return nil
 	}
 
 	ctx, committer, err := db.TxContext(ctx)
@@ -103,7 +107,7 @@ func RenameUser(ctx context.Context, u *user_model.User, newUserName string) err
 	}
 
 	// Do not fail if directory does not exist
-	if err = util.Rename(user_model.UserPath(oldUserName), user_model.UserPath(newUserName)); err != nil && !os.IsNotExist(err) {
+	if err = util.RenameWithRetry(gitrepo.UserLocalPath(oldUserName), gitrepo.UserLocalPath(newUserName)); err != nil && !os.IsNotExist(err) {
 		u.Name = oldUserName
 		u.LowerName = strings.ToLower(oldUserName)
 		return fmt.Errorf("rename user directory: %w", err)
@@ -112,13 +116,24 @@ func RenameUser(ctx context.Context, u *user_model.User, newUserName string) err
 	if err = committer.Commit(); err != nil {
 		u.Name = oldUserName
 		u.LowerName = strings.ToLower(oldUserName)
-		if err2 := util.Rename(user_model.UserPath(newUserName), user_model.UserPath(oldUserName)); err2 != nil && !os.IsNotExist(err2) {
-			log.Critical("Unable to rollback directory change during failed username change from: %s to: %s. DB Error: %v. Filesystem Error: %v", oldUserName, newUserName, err, err2)
+		if err2 := util.RenameWithRetry(gitrepo.UserLocalPath(newUserName), gitrepo.UserLocalPath(oldUserName)); err2 != nil && !os.IsNotExist(err2) {
+			log.Error("Unable to rollback directory change during failed username change from: %s to: %s. DB Error: %v. Filesystem Error: %v", oldUserName, newUserName, err, err2)
 			return fmt.Errorf("failed to rollback directory change during failed username change from: %s to: %s. DB Error: %w. Filesystem Error: %v", oldUserName, newUserName, err, err2)
 		}
 		return err
 	}
+
+	recordNameChange(ctx, u, oldUserName)
+
 	return nil
+}
+
+func recordNameChange(ctx context.Context, u *user_model.User, oldUserName string) {
+	if u.IsOrganization() {
+		audit.Record(ctx, audit_model.OrganizationName, u, "previous_name", oldUserName)
+	} else {
+		audit.Record(ctx, audit_model.UserName, u, "previous_name", oldUserName)
+	}
 }
 
 // DeleteUser completely and permanently deletes everything of a user,
@@ -129,8 +144,8 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 		return fmt.Errorf("%s is an organization not a user", u.Name)
 	}
 
-	if user_model.IsLastAdminUser(ctx, u) {
-		return models.ErrDeleteLastAdminUser{UID: u.ID}
+	if u.IsActive && user_model.IsLastAdminUser(ctx, u) {
+		return user_model.ErrDeleteLastAdminUser{UID: u.ID}
 	}
 
 	if purge {
@@ -152,9 +167,7 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 
 		// Force any logged in sessions to log out
 		// FIXME: We also need to tell the session manager to log them out too.
-		eventsource.GetManager().SendMessage(u.ID, &eventsource.Event{
-			Name: "logout",
-		})
+		websocket_service.PublishLogout(u.ID, "")
 
 		// Delete all repos belonging to this user
 		// Now this is not within a transaction because there are internal transactions within the DeleteRepository
@@ -181,8 +194,8 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 					PageSize: repo_model.RepositoryListDefaultPageSize,
 					Page:     1,
 				},
-				UserID:         u.ID,
-				IncludePrivate: true,
+				UserID:            u.ID,
+				IncludeVisibility: structs.VisibleTypePrivate,
 			})
 			if err != nil {
 				return fmt.Errorf("unable to find org list for %s[%d]. Error: %w", u.Name, u.ID, err)
@@ -191,7 +204,7 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 				break
 			}
 			for _, org := range orgs {
-				if err := models.RemoveOrgUser(ctx, org.ID, u.ID); err != nil {
+				if err := org_service.RemoveOrgUser(ctx, org, u); err != nil {
 					if organization.IsErrLastOrgOwner(err) {
 						err = org_service.DeleteOrganization(ctx, org, true)
 						if err != nil {
@@ -213,99 +226,109 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 		}
 	}
 
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
+		// Note: A user owns any repository or belongs to any organization
+		//	cannot perform delete operation. This causes a race with the purge above
+		//  however consistency requires that we ensure that this is the case
 
-	// Note: A user owns any repository or belongs to any organization
-	//	cannot perform delete operation. This causes a race with the purge above
-	//  however consistency requires that we ensure that this is the case
+		// Check ownership of repository.
+		count, err := repo_model.CountRepositories(ctx, repo_model.CountRepositoryOptions{OwnerID: u.ID})
+		if err != nil {
+			return fmt.Errorf("GetRepositoryCount: %w", err)
+		} else if count > 0 {
+			return repo_model.ErrUserOwnRepos{UID: u.ID}
+		}
 
-	// Check ownership of repository.
-	count, err := repo_model.CountRepositories(ctx, repo_model.CountRepositoryOptions{OwnerID: u.ID})
-	if err != nil {
-		return fmt.Errorf("GetRepositoryCount: %w", err)
-	} else if count > 0 {
-		return models.ErrUserOwnRepos{UID: u.ID}
-	}
+		// Check membership of organization.
+		count, err = organization.GetOrganizationCount(ctx, u)
+		if err != nil {
+			return fmt.Errorf("GetOrganizationCount: %w", err)
+		} else if count > 0 {
+			return organization.ErrUserHasOrgs{UID: u.ID}
+		}
 
-	// Check membership of organization.
-	count, err = organization.GetOrganizationCount(ctx, u)
-	if err != nil {
-		return fmt.Errorf("GetOrganizationCount: %w", err)
-	} else if count > 0 {
-		return models.ErrUserHasOrgs{UID: u.ID}
-	}
+		// Check ownership of packages.
+		if ownsPackages, err := packages_model.HasOwnerPackages(ctx, u.ID); err != nil {
+			return fmt.Errorf("HasOwnerPackages: %w", err)
+		} else if ownsPackages {
+			return packages_model.ErrUserOwnPackages{UID: u.ID}
+		}
 
-	// Check ownership of packages.
-	if ownsPackages, err := packages_model.HasOwnerPackages(ctx, u.ID); err != nil {
-		return fmt.Errorf("HasOwnerPackages: %w", err)
-	} else if ownsPackages {
-		return models.ErrUserOwnPackages{UID: u.ID}
-	}
+		if err := deleteUser(ctx, u, purge); err != nil {
+			return fmt.Errorf("DeleteUser: %w", err)
+		}
 
-	if err := deleteUser(ctx, u, purge); err != nil {
-		return fmt.Errorf("DeleteUser: %w", err)
-	}
-
-	if err := committer.Commit(); err != nil {
-		return err
-	}
-	committer.Close()
-
-	if err = asymkey_model.RewriteAllPublicKeys(ctx); err != nil {
-		return err
-	}
-	if err = asymkey_model.RewriteAllPrincipalKeys(ctx); err != nil {
+		// Finally delete any unlinked attachments, this will also delete the attached files
+		if err := deleteUserUnlinkedAttachments(ctx, u); err != nil {
+			return fmt.Errorf("deleteUserUnlinkedAttachments: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 
-	// Note: There are something just cannot be roll back,
-	//	so just keep error logs of those operations.
-	path := user_model.UserPath(u.Name)
-	if err := util.RemoveAll(path); err != nil {
-		err = fmt.Errorf("Failed to RemoveAll %s: %w", path, err)
+	if err := asymkey_service.RewriteAllPublicKeys(ctx); err != nil {
+		return err
+	}
+	if err := asymkey_service.RewriteAllPrincipalKeys(ctx); err != nil {
+		return err
+	}
+
+	// Note: There are something just cannot be roll back, so just keep error logs of those operations.
+	path := gitrepo.UserLocalPath(u.Name)
+	if err := util.RemoveAllWithRetry(path); err != nil {
+		err = fmt.Errorf("failed to RemoveAll %s: %w", path, err)
 		_ = system_model.CreateNotice(ctx, system_model.NoticeTask, fmt.Sprintf("delete user '%s': %v", u.Name, err))
-		return err
 	}
 
 	if u.Avatar != "" {
 		avatarPath := u.CustomAvatarRelativePath()
 		if err := storage.Avatars.Delete(avatarPath); err != nil {
-			err = fmt.Errorf("Failed to remove %s: %w", avatarPath, err)
+			err = fmt.Errorf("failed to remove %s: %w", avatarPath, err)
 			_ = system_model.CreateNotice(ctx, system_model.NoticeTask, fmt.Sprintf("delete user '%s': %v", u.Name, err))
-			return err
 		}
 	}
+
+	audit.Record(ctx, audit_model.UserDelete, u)
 
 	return nil
 }
 
-// DeleteInactiveUsers deletes all inactive users and email addresses.
+func deleteUserUnlinkedAttachments(ctx context.Context, u *user_model.User) error {
+	attachments, err := repo_model.GetUnlinkedAttachmentsByUserID(ctx, u.ID)
+	if err != nil {
+		return fmt.Errorf("GetUnlinkedAttachmentsByUserID: %w", err)
+	}
+	for _, attach := range attachments {
+		if err := repo_model.DeleteAttachment(ctx, attach, true); err != nil {
+			return fmt.Errorf("DeleteAttachment ID[%d]: %w", attach.ID, err)
+		}
+	}
+	return nil
+}
+
+// DeleteInactiveUsers deletes all inactive users and their email addresses.
 func DeleteInactiveUsers(ctx context.Context, olderThan time.Duration) error {
-	users, err := user_model.GetInactiveUsers(ctx, olderThan)
+	inactiveUsers, err := user_model.GetInactiveUsers(ctx, olderThan)
 	if err != nil {
 		return err
 	}
 
 	// FIXME: should only update authorized_keys file once after all deletions.
-	for _, u := range users {
-		select {
-		case <-ctx.Done():
-			return db.ErrCancelledf("Before delete inactive user %s", u.Name)
-		default:
-		}
-		if err := DeleteUser(ctx, u, false); err != nil {
-			// Ignore users that were set inactive by admin.
-			if models.IsErrUserOwnRepos(err) || models.IsErrUserHasOrgs(err) ||
-				models.IsErrUserOwnPackages(err) || models.IsErrDeleteLastAdminUser(err) {
+	for _, u := range inactiveUsers {
+		if err = DeleteUser(ctx, u, false); err != nil {
+			// Ignore inactive users that were ever active but then were set inactive by admin
+			if repo_model.IsErrUserOwnRepos(err) || organization.IsErrUserHasOrgs(err) || packages_model.IsErrUserOwnPackages(err) {
+				log.Warn("Inactive user %q has repositories, organizations or packages, skipping deletion: %v", u.Name, err)
 				continue
 			}
-			return err
+			select {
+			case <-ctx.Done():
+				return db.ErrCancelledf("when deleting inactive user %q", u.Name)
+			default:
+				return err
+			}
 		}
 	}
-
-	return user_model.DeleteInactiveEmailAddresses(ctx)
+	return nil // TODO: there could be still inactive users left, and the number would increase gradually
 }

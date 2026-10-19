@@ -1,7 +1,9 @@
 {{.Message}}
+{{if .Details}}
 <details>
 	<summary>{{.Summary}}</summary>
-	<code>
-		{{.Details | Str2html}}
-	</code>
+	<pre>{{.Details}}</pre>
 </details>
+{{else}}
+<div>{{.Summary}}</div>
+{{end}}

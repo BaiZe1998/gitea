@@ -7,14 +7,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
-	"code.gitea.io/gitea/models/db"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/container"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/db"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/timeutil"
+	"gitea.dev/modules/util"
 
 	"xorm.io/builder"
 )
@@ -163,8 +164,8 @@ func FindReactions(ctx context.Context, opts FindReactionsOptions) (ReactionList
 		Where(opts.toConds()).
 		In("reaction.`type`", setting.UI.Reactions).
 		Asc("reaction.issue_id", "reaction.comment_id", "reaction.created_unix", "reaction.id")
-	if opts.Page != 0 {
-		sess = db.SetSessionPagination(sess, &opts)
+	if opts.Page > 0 {
+		db.SetSessionPagination(sess, &opts)
 
 		reactions := make([]*Reaction, 0, opts.PageSize)
 		count, err := sess.FindAndCount(&reactions)
@@ -223,39 +224,8 @@ func CreateReaction(ctx context.Context, opts *ReactionOptions) (*Reaction, erro
 		return nil, ErrForbiddenIssueReaction{opts.Type}
 	}
 
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer committer.Close()
-
-	reaction, err := createReaction(ctx, opts)
-	if err != nil {
-		return reaction, err
-	}
-
-	if err := committer.Commit(); err != nil {
-		return nil, err
-	}
-	return reaction, nil
-}
-
-// CreateIssueReaction creates a reaction on issue.
-func CreateIssueReaction(ctx context.Context, doerID, issueID int64, content string) (*Reaction, error) {
-	return CreateReaction(ctx, &ReactionOptions{
-		Type:    content,
-		DoerID:  doerID,
-		IssueID: issueID,
-	})
-}
-
-// CreateCommentReaction creates a reaction on comment.
-func CreateCommentReaction(ctx context.Context, doerID, issueID, commentID int64, content string) (*Reaction, error) {
-	return CreateReaction(ctx, &ReactionOptions{
-		Type:      content,
-		DoerID:    doerID,
-		IssueID:   issueID,
-		CommentID: commentID,
+	return db.WithTx2(ctx, func(ctx context.Context) (*Reaction, error) {
+		return createReaction(ctx, opts)
 	})
 }
 
@@ -324,14 +294,12 @@ func (list ReactionList) GroupByType() map[string]ReactionList {
 }
 
 func (list ReactionList) getUserIDs() []int64 {
-	userIDs := make(container.Set[int64], len(list))
-	for _, reaction := range list {
+	return container.FilterSlice(list, func(reaction *Reaction) (int64, bool) {
 		if reaction.OriginalAuthor != "" {
-			continue
+			return 0, false
 		}
-		userIDs.Add(reaction.UserID)
-	}
-	return userIDs.Values()
+		return reaction.UserID, true
+	})
 }
 
 func valuesUser(m map[int64]*user_model.User) []*user_model.User {
@@ -340,6 +308,11 @@ func valuesUser(m map[int64]*user_model.User) []*user_model.User {
 		values = append(values, v)
 	}
 	return values
+}
+
+// newMigrationOriginalUser creates and returns a fake user for external user
+func newMigrationOriginalUser(name string) *user_model.User {
+	return &user_model.User{ID: 0, Name: name, LowerName: strings.ToLower(name)}
 }
 
 // LoadUsers loads reactions' all users
@@ -359,7 +332,7 @@ func (list ReactionList) LoadUsers(ctx context.Context, repo *repo_model.Reposit
 
 	for _, reaction := range list {
 		if reaction.OriginalAuthor != "" {
-			reaction.User = user_model.NewReplaceUser(fmt.Sprintf("%s(%s)", reaction.OriginalAuthor, repo.OriginalServiceType.Name()))
+			reaction.User = newMigrationOriginalUser(fmt.Sprintf("%s(%s)", reaction.OriginalAuthor, repo.OriginalServiceType.Name()))
 		} else if user, ok := userMaps[reaction.UserID]; ok {
 			reaction.User = user
 		} else {

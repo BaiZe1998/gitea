@@ -16,9 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
 const (
@@ -121,33 +120,24 @@ func getProvidedFDs() (savedErr error) {
 				continue
 			}
 
-			// If needed we can handle packetconns here.
-			savedErr = fmt.Errorf("Error getting provided socket fd %d: %w", i, err)
+			savedErr = fmt.Errorf("error getting provided socket fd %d: %w", i, err)
 			return
 		}
 	})
 	return savedErr
 }
 
-// CloseProvidedListeners closes all unused provided listeners.
-func CloseProvidedListeners() error {
+// closeProvidedListeners closes all unused provided listeners.
+func closeProvidedListeners() {
 	mutex.Lock()
 	defer mutex.Unlock()
-	var returnableError error
 	for _, l := range providedListeners {
 		err := l.Close()
 		if err != nil {
 			log.Error("Error in closing unused provided listener: %v", err)
-			if returnableError != nil {
-				returnableError = fmt.Errorf("%v & %w", returnableError, err)
-			} else {
-				returnableError = err
-			}
 		}
 	}
 	providedListeners = []net.Listener{}
-
-	return returnableError
 }
 
 // DefaultGetListener obtains a listener for the stream-oriented local network address:
@@ -187,13 +177,15 @@ func GetListenerTCP(network string, address *net.TCPAddr) (*net.TCPListener, err
 	// look for a provided listener
 	for i, l := range providedListeners {
 		if isSameAddr(l.Addr(), address) {
+			tcpListener := l.(*net.TCPListener) //nolint:forcetypeassert // a listener matching a *net.TCPAddr is a *net.TCPListener
+
 			providedListeners = append(providedListeners[:i], providedListeners[i+1:]...)
 			needsUnlink := providedListenersToUnlink[i]
 			providedListenersToUnlink = append(providedListenersToUnlink[:i], providedListenersToUnlink[i+1:]...)
 
 			activeListeners = append(activeListeners, l)
 			activeListenersToUnlink = append(activeListenersToUnlink, needsUnlink)
-			return l.(*net.TCPListener), nil
+			return tcpListener, nil
 		}
 	}
 
@@ -221,13 +213,14 @@ func GetListenerUnix(network string, address *net.UnixAddr) (*net.UnixListener, 
 	// look for a provided listener
 	for i, l := range providedListeners {
 		if isSameAddr(l.Addr(), address) {
+			unixListener := l.(*net.UnixListener) //nolint:forcetypeassert // a listener matching a *net.UnixAddr is a *net.UnixListener
+
 			providedListeners = append(providedListeners[:i], providedListeners[i+1:]...)
 			needsUnlink := providedListenersToUnlink[i]
 			providedListenersToUnlink = append(providedListenersToUnlink[:i], providedListenersToUnlink[i+1:]...)
 
 			activeListenersToUnlink = append(activeListenersToUnlink, needsUnlink)
 			activeListeners = append(activeListeners, l)
-			unixListener := l.(*net.UnixListener)
 			if needsUnlink {
 				unixListener.SetUnlinkOnClose(true)
 			}
@@ -236,8 +229,8 @@ func GetListenerUnix(network string, address *net.UnixAddr) (*net.UnixListener, 
 	}
 
 	// make a fresh listener
-	if err := util.Remove(address.Name); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("Failed to remove unix socket %s: %w", address.Name, err)
+	if err := os.Remove(address.Name); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to remove unix socket %s: %w", address.Name, err)
 	}
 
 	l, err := net.ListenUnix(network, address)
@@ -247,7 +240,7 @@ func GetListenerUnix(network string, address *net.UnixAddr) (*net.UnixListener, 
 
 	fileMode := os.FileMode(setting.UnixSocketPermission)
 	if err = os.Chmod(address.Name, fileMode); err != nil {
-		return nil, fmt.Errorf("Failed to set permission of unix socket to %s: %w", fileMode.String(), err)
+		return nil, fmt.Errorf("failed to set permission of unix socket to %s: %w", fileMode.String(), err)
 	}
 
 	activeListeners = append(activeListeners, l)
@@ -298,11 +291,11 @@ func getActiveListenersToUnlink() []bool {
 func getNotifySocket() (*net.UnixConn, error) {
 	if err := getProvidedFDs(); err != nil {
 		// This error will be logged elsewhere
-		return nil, nil
+		return nil, nil //nolint:nilnil // return nil when no provided FDs are available
 	}
 
 	if notifySocketAddr == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // return nil when notify socket is not configured
 	}
 
 	socketAddr := &net.UnixAddr{

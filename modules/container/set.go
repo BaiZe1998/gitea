@@ -3,6 +3,8 @@
 
 package container
 
+import "maps"
+
 type Set[T comparable] map[T]struct{}
 
 // SetOf creates a set and adds the specified elements to it.
@@ -29,11 +31,15 @@ func (s Set[T]) AddMultiple(values ...T) {
 	}
 }
 
-// Contains determines whether a set contains the specified element.
-// Returns true if the set contains the specified element; otherwise, false.
-func (s Set[T]) Contains(value T) bool {
-	_, has := s[value]
-	return has
+// Contains determines whether a set contains all these elements.
+// Returns true if the set contains all these elements; otherwise, false.
+func (s Set[T]) Contains(values ...T) bool {
+	ret := true
+	for _, value := range values {
+		_, has := s[value]
+		ret = ret && has
+	}
+	return ret
 }
 
 // Remove removes the specified element.
@@ -46,6 +52,28 @@ func (s Set[T]) Remove(value T) bool {
 	return false
 }
 
+// RemoveFromSet removes the specified elements from the set.
+// Returns the number of elements successfully removed.
+func (s Set[T]) RemoveFromSet(o Set[T]) (n int) {
+	for value := range o {
+		if s.Remove(value) {
+			n++
+		}
+	}
+	return n
+}
+
+// RemoveFromSlice removes the specified elements from the slice.
+// Returns the number of elements successfully removed.
+func (s Set[T]) RemoveFromSlice(o []T) (n int) {
+	for _, value := range o {
+		if s.Remove(value) {
+			n++
+		}
+	}
+	return n
+}
+
 // Values gets a list of all elements in the set.
 func (s Set[T]) Values() []T {
 	keys := make([]T, 0, len(s))
@@ -53,4 +81,13 @@ func (s Set[T]) Values() []T {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// Union constructs a new set that is the union of the provided sets
+func (s Set[T]) Union(sets ...Set[T]) Set[T] {
+	newSet := maps.Clone(s)
+	for i := range sets {
+		maps.Copy(newSet, sets[i])
+	}
+	return newSet
 }

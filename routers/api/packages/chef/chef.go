@@ -13,15 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/models/db"
-	packages_model "code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/modules/context"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	chef_module "code.gitea.io/gitea/modules/packages/chef"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	packages_service "code.gitea.io/gitea/services/packages"
+	"gitea.dev/models/db"
+	packages_model "gitea.dev/models/packages"
+	"gitea.dev/modules/optional"
+	packages_module "gitea.dev/modules/packages"
+	chef_module "gitea.dev/modules/packages/chef"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	packages_service "gitea.dev/services/packages"
 )
 
 func apiError(ctx *context.Context, status int, obj any) {
@@ -29,10 +30,9 @@ func apiError(ctx *context.Context, status int, obj any) {
 		ErrorMessages []string `json:"error_messages"`
 	}
 
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		ctx.JSON(status, Error{
-			ErrorMessages: []string{message},
-		})
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	ctx.JSON(status, Error{
+		ErrorMessages: []string{message},
 	})
 }
 
@@ -40,7 +40,7 @@ func PackagesUniverse(ctx *context.Context) {
 	pvs, _, err := packages_model.SearchVersions(ctx, &packages_model.PackageSearchOptions{
 		OwnerID:    ctx.Package.Owner.ID,
 		Type:       packages_model.TypeChef,
-		IsInternal: util.OptionalBoolFalse,
+		IsInternal: optional.Some(false),
 	})
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
@@ -71,7 +71,7 @@ func PackagesUniverse(ctx *context.Context) {
 			LocationType: "opscode",
 			LocationPath: baseURL,
 			DownloadURL:  fmt.Sprintf("%s/cookbooks/%s/versions/%s/download", baseURL, url.PathEscape(pd.Package.Name), pd.Version.Version),
-			Dependencies: pd.Metadata.(*chef_module.Metadata).Dependencies,
+			Dependencies: packages_model.DescriptorMetadata[*chef_module.Metadata](pd).Dependencies,
 		}
 	}
 
@@ -85,7 +85,7 @@ func EnumeratePackages(ctx *context.Context) {
 		OwnerID:    ctx.Package.Owner.ID,
 		Type:       packages_model.TypeChef,
 		Name:       packages_model.SearchValue{Value: ctx.FormTrim("q")},
-		IsInternal: util.OptionalBoolFalse,
+		IsInternal: optional.Some(false),
 		Paginator: db.NewAbsoluteListOptions(
 			ctx.FormInt("start"),
 			ctx.FormInt("items"),
@@ -128,7 +128,7 @@ func EnumeratePackages(ctx *context.Context) {
 
 	items := make([]*Item, 0, len(pds))
 	for _, pd := range pds {
-		metadata := pd.Metadata.(*chef_module.Metadata)
+		metadata := packages_model.DescriptorMetadata[*chef_module.Metadata](pd)
 
 		items = append(items, &Item{
 			CookbookName:        pd.Package.Name,
@@ -149,7 +149,7 @@ func EnumeratePackages(ctx *context.Context) {
 
 // https://github.com/chef/chef/blob/main/knife/lib/chef/knife/supermarket_show.rb
 func PackageMetadata(ctx *context.Context) {
-	packageName := ctx.Params("name")
+	packageName := ctx.PathParam("name")
 
 	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeChef, packageName)
 	if err != nil {
@@ -193,7 +193,7 @@ func PackageMetadata(ctx *context.Context) {
 
 	latest := pds[len(pds)-1]
 
-	metadata := latest.Metadata.(*chef_module.Metadata)
+	metadata := packages_model.DescriptorMetadata[*chef_module.Metadata](latest)
 
 	ctx.JSON(http.StatusOK, &Result{
 		Name:          latest.Package.Name,
@@ -210,12 +210,12 @@ func PackageMetadata(ctx *context.Context) {
 
 // https://github.com/chef/chef/blob/main/knife/lib/chef/knife/supermarket_show.rb
 func PackageVersionMetadata(ctx *context.Context) {
-	packageName := ctx.Params("name")
-	packageVersion := strings.ReplaceAll(ctx.Params("version"), "_", ".") // Chef calls this endpoint with "_" instead of "."?!
+	packageName := ctx.PathParam("name")
+	packageVersion := strings.ReplaceAll(ctx.PathParam("version"), "_", ".") // Chef calls this endpoint with "_" instead of "."?!
 
 	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypeChef, packageName, packageVersion)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -241,7 +241,7 @@ func PackageVersionMetadata(ctx *context.Context) {
 
 	baseURL := fmt.Sprintf("%sapi/packages/%s/chef/api/v1/cookbooks/%s", setting.AppURL, ctx.Package.Owner.Name, url.PathEscape(pd.Package.Name))
 
-	metadata := pd.Metadata.(*chef_module.Metadata)
+	metadata := packages_model.DescriptorMetadata[*chef_module.Metadata](pd)
 
 	ctx.JSON(http.StatusOK, &Result{
 		Version:         pd.Version.Version,
@@ -324,9 +324,9 @@ func UploadPackage(ctx *context.Context) {
 
 // https://github.com/chef/chef/blob/main/knife/lib/chef/knife/supermarket_download.rb
 func DownloadPackage(ctx *context.Context) {
-	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypeChef, ctx.Params("name"), ctx.Params("version"))
+	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypeChef, ctx.PathParam("name"), ctx.PathParam("version"))
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -342,7 +342,7 @@ func DownloadPackage(ctx *context.Context) {
 
 	pf := pd.Files[0].File
 
-	s, u, _, err := packages_service.GetPackageFileStream(ctx, pf)
+	s, u, _, err := packages_service.OpenFileForDownload(ctx, pf, ctx.Req.Method)
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
@@ -353,8 +353,8 @@ func DownloadPackage(ctx *context.Context) {
 
 // https://github.com/chef/chef/blob/main/knife/lib/chef/knife/supermarket_unshare.rb
 func DeletePackageVersion(ctx *context.Context) {
-	packageName := ctx.Params("name")
-	packageVersion := ctx.Params("version")
+	packageName := ctx.PathParam("name")
+	packageVersion := ctx.PathParam("version")
 
 	err := packages_service.RemovePackageVersionByNameAndVersion(
 		ctx,
@@ -367,7 +367,7 @@ func DeletePackageVersion(ctx *context.Context) {
 		},
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 		} else {
 			apiError(ctx, http.StatusInternalServerError, err)
@@ -380,7 +380,7 @@ func DeletePackageVersion(ctx *context.Context) {
 
 // https://github.com/chef/chef/blob/main/knife/lib/chef/knife/supermarket_unshare.rb
 func DeletePackage(ctx *context.Context) {
-	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeChef, ctx.Params("name"))
+	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeChef, ctx.PathParam("name"))
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return

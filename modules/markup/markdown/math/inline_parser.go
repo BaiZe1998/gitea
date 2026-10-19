@@ -12,88 +12,145 @@ import (
 )
 
 type inlineParser struct {
-	start []byte
-	end   []byte
+	trigger              []byte
+	endBytesSingleDollar []byte
+	endBytesDoubleDollar []byte
+	endBytesParentheses  []byte
+	enableInlineDollar   bool
 }
 
-var defaultInlineDollarParser = &inlineParser{
-	start: []byte{'$'},
-	end:   []byte{'$'},
+func NewInlineDollarParser(enableInlineDollar bool) parser.InlineParser {
+	return &inlineParser{
+		trigger:              []byte{'$'},
+		endBytesSingleDollar: []byte{'$'},
+		endBytesDoubleDollar: []byte{'$', '$'},
+		enableInlineDollar:   enableInlineDollar,
+	}
 }
 
-// NewInlineDollarParser returns a new inline parser
-func NewInlineDollarParser() parser.InlineParser {
-	return defaultInlineDollarParser
+var defaultInlineParenthesesParser = &inlineParser{
+	trigger:             []byte{'\\', '('},
+	endBytesParentheses: []byte{'\\', ')'},
 }
 
-var defaultInlineBracketParser = &inlineParser{
-	start: []byte{'\\', '('},
-	end:   []byte{'\\', ')'},
-}
-
-// NewInlineDollarParser returns a new inline parser
-func NewInlineBracketParser() parser.InlineParser {
-	return defaultInlineBracketParser
+func NewInlineParenthesesParser() parser.InlineParser {
+	return defaultInlineParenthesesParser
 }
 
 // Trigger triggers this parser on $ or \
 func (parser *inlineParser) Trigger() []byte {
-	return parser.start[0:1]
+	return parser.trigger
+}
+
+func isPunctuation(b byte) bool {
+	return b == '.' || b == '!' || b == '?' || b == ',' || b == ';' || b == ':'
+}
+
+func isParenthesesClose(b byte) bool {
+	return b == ')'
 }
 
 func isAlphanumeric(b byte) bool {
-	// Github only cares about 0-9A-Za-z
-	return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+func isInMarkdownLinkText(block text.Reader, lineAfter []byte) bool {
+	return block.PrecendingCharacter() == '[' && bytes.HasPrefix(lineAfter, []byte("]("))
 }
 
 // Parse parses the current line and returns a result of parsing.
 func (parser *inlineParser) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
 	line, _ := block.PeekLine()
 
-	if !bytes.HasPrefix(line, parser.start) {
+	if !bytes.HasPrefix(line, parser.trigger) {
 		// We'll catch this one on the next time round
 		return nil
 	}
 
-	precedingCharacter := block.PrecendingCharacter()
-	if precedingCharacter < 256 && isAlphanumeric(byte(precedingCharacter)) {
-		// need to exclude things like `a$` from being considered a start
+	var startMarkLen int
+	var stopMark []byte
+	checkSurrounding := true
+	if line[0] == '$' {
+		startMarkLen = 1
+		stopMark = parser.endBytesSingleDollar
+		if len(line) > 1 {
+			switch line[1] {
+			case '$':
+				startMarkLen = 2
+				stopMark = parser.endBytesDoubleDollar
+			case '`':
+				pos := 1
+				for ; pos < len(line) && line[pos] == '`'; pos++ {
+				}
+				startMarkLen = pos
+				stopMark = bytes.Repeat([]byte{'`'}, pos)
+				stopMark[len(stopMark)-1] = '$'
+				checkSurrounding = false
+			}
+		}
+	} else {
+		startMarkLen = 2
+		stopMark = parser.endBytesParentheses
+		checkSurrounding = false // explicit delimiters like "$`...`$", adjacent text is unambiguous
+	}
+
+	if line[0] == '$' && !parser.enableInlineDollar && (len(line) == 1 || line[1] != '`') {
 		return nil
 	}
 
-	// move the opener marker point at the start of the text
-	opener := len(parser.start)
-
-	// Now look for an ending line
-	ender := opener
-	for {
-		pos := bytes.Index(line[ender:], parser.end)
-		if pos < 0 {
+	if checkSurrounding {
+		precedingCharacter := block.PrecendingCharacter()
+		if precedingCharacter < 256 && (isAlphanumeric(byte(precedingCharacter)) || isPunctuation(byte(precedingCharacter))) {
+			// need to exclude things like `a$` from being considered a start
 			return nil
 		}
+	}
 
-		ender += pos
+	// move the opener marker point at the start of the text
+	opener := startMarkLen
 
-		// Now we want to check the character at the end of our parser section
-		// that is ender + len(parser.end)
-		pos = ender + len(parser.end)
-		if len(line) <= pos {
+	// Now look for an ending line
+	depth := 0
+	ender := -1
+	for i := opener; i < len(line); i++ {
+		if depth == 0 && bytes.HasPrefix(line[i:], stopMark) {
+			succeedingCharacter := byte(0)
+			if i+len(stopMark) < len(line) {
+				succeedingCharacter = line[i+len(stopMark)]
+			}
+			// check valid ending character
+			isValidEndingChar := isPunctuation(succeedingCharacter) || isParenthesesClose(succeedingCharacter) ||
+				succeedingCharacter == ' ' || succeedingCharacter == '\n' || succeedingCharacter == 0 ||
+				succeedingCharacter == '$' ||
+				isInMarkdownLinkText(block, line[i+len(stopMark):])
+			if checkSurrounding && !isValidEndingChar {
+				break
+			}
+			ender = i
 			break
 		}
-		if !isAlphanumeric(line[pos]) {
-			break
+		if line[i] == '\\' {
+			i++
+			continue
 		}
-		// move the pointer onwards
-		ender += len(parser.end)
+		switch line[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+	}
+	if ender == -1 {
+		return nil
 	}
 
 	block.Advance(opener)
 	_, pos := block.Position()
 	node := NewInline()
+
 	segment := pos.WithStop(pos.Start + ender - opener)
 	node.AppendChild(node, ast.NewRawTextSegment(segment))
-	block.Advance(ender - opener + len(parser.end))
-
+	block.Advance(ender - opener + len(stopMark))
 	trimBlock(node, block)
 	return node
 }
@@ -104,12 +161,12 @@ func trimBlock(node *Inline, block text.Reader) {
 	}
 
 	// trim first space and last space
-	first := node.FirstChild().(*ast.Text)
+	first := node.FirstChild().(*ast.Text) //nolint:forcetypeassert // an inline math node only holds text children
 	if !(!first.Segment.IsEmpty() && block.Source()[first.Segment.Start] == ' ') {
 		return
 	}
 
-	last := node.LastChild().(*ast.Text)
+	last := node.LastChild().(*ast.Text) //nolint:forcetypeassert // an inline math node only holds text children
 	if !(!last.Segment.IsEmpty() && block.Source()[last.Segment.Stop-1] == ' ') {
 		return
 	}

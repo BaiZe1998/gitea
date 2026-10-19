@@ -4,13 +4,16 @@
 package repo
 
 import (
-	"fmt"
 	"strconv"
 
-	system_model "code.gitea.io/gitea/models/system"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/git"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	"gitea.dev/services/context"
+	"gitea.dev/services/gitdiff"
+	user_service "gitea.dev/services/user"
 )
 
 // SetEditorconfigIfExists set editor config as render variable
@@ -19,45 +22,34 @@ func SetEditorconfigIfExists(ctx *context.Context) {
 		return
 	}
 
-	ec, _, err := ctx.Repo.GetEditorconfig()
-
-	if err != nil && !git.IsErrNotExist(err) {
-		description := fmt.Sprintf("Error while getting .editorconfig file: %v", err)
-		if err := system_model.CreateRepositoryNotice(description); err != nil {
-			ctx.ServerError("ErrCreatingReporitoryNotice", err)
-		}
+	ec, _, err := ctx.Repo.GetEditorconfig(ctx)
+	if err != nil {
+		// it used to check `!git.IsErrNotExist(err)` and create a system notice, but it is quite annoying and useless
+		// because network errors also happen frequently, so we just ignore it
 		return
 	}
 
 	ctx.Data["Editorconfig"] = ec
 }
 
+func GetDiffViewStyle(ctx *context.Context) string {
+	return util.Iif(ctx.Data["IsSplitStyle"] == true, gitdiff.DiffStyleSplit, gitdiff.DiffStyleUnified)
+}
+
 // SetDiffViewStyle set diff style as render variable
 func SetDiffViewStyle(ctx *context.Context) {
-	queryStyle := ctx.FormString("style")
-
-	if !ctx.IsSigned {
-		ctx.Data["IsSplitStyle"] = queryStyle == "split"
-		return
+	style := ctx.FormString("style")
+	if ctx.IsSigned {
+		style = util.IfZero(style, ctx.Doer.DiffViewStyle)
+		style = util.Iif(style == gitdiff.DiffStyleSplit, gitdiff.DiffStyleSplit, gitdiff.DiffStyleUnified)
+		if style != ctx.Doer.DiffViewStyle {
+			err := user_service.UpdateUser(ctx, ctx.Doer, &user_service.UpdateOptions{DiffViewStyle: optional.Some(style)})
+			if err != nil {
+				log.Error("UpdateUser DiffViewStyle: %v", err)
+			}
+		}
 	}
-
-	var (
-		userStyle = ctx.Doer.DiffViewStyle
-		style     string
-	)
-
-	if queryStyle == "unified" || queryStyle == "split" {
-		style = queryStyle
-	} else if userStyle == "unified" || userStyle == "split" {
-		style = userStyle
-	} else {
-		style = "unified"
-	}
-
 	ctx.Data["IsSplitStyle"] = style == "split"
-	if err := user_model.UpdateUserDiffViewStyle(ctx, ctx.Doer, style); err != nil {
-		ctx.ServerError("ErrUpdateDiffViewStyle", err)
-	}
 }
 
 // SetWhitespaceBehavior set whitespace behavior as render variable
@@ -89,26 +81,34 @@ func SetWhitespaceBehavior(ctx *context.Context) {
 	}
 }
 
+func GetWhitespaceBehavior(ctx *context.Context) string {
+	behavior, ok := ctx.Data["WhitespaceBehavior"].(string)
+	if !ok {
+		setting.PanicInDevOrTesting("WhitespaceBehavior is not set in context data or is not a string")
+	}
+	return behavior
+}
+
 // SetShowOutdatedComments set the show outdated comments option as context variable
 func SetShowOutdatedComments(ctx *context.Context) {
 	showOutdatedCommentsValue := ctx.FormString("show-outdated")
-	// var showOutdatedCommentsValue string
-
 	if showOutdatedCommentsValue != "true" && showOutdatedCommentsValue != "false" {
 		// invalid or no value for this form string -> use default or stored user setting
+		showOutdatedCommentsValue = "true"
 		if ctx.IsSigned {
-			showOutdatedCommentsValue, _ = user_model.GetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyShowOutdatedComments, "false")
-		} else {
-			// not logged in user -> use the default value
-			showOutdatedCommentsValue = "false"
+			showOutdatedCommentsValue, _ = user_model.GetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyShowOutdatedComments, showOutdatedCommentsValue)
 		}
-	} else {
+	} else if ctx.IsSigned {
 		// valid value -> update user setting if user is logged in
-		if ctx.IsSigned {
-			_ = user_model.SetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyShowOutdatedComments, showOutdatedCommentsValue)
-		}
+		_ = user_model.SetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyShowOutdatedComments, showOutdatedCommentsValue)
 	}
+	ctx.Data["ShowOutdatedComments"], _ = strconv.ParseBool(showOutdatedCommentsValue)
+}
 
-	showOutdatedComments, _ := strconv.ParseBool(showOutdatedCommentsValue)
-	ctx.Data["ShowOutdatedComments"] = showOutdatedComments
+func GetShowOutdatedComments(ctx *context.Context) bool {
+	show, ok := ctx.Data["ShowOutdatedComments"].(bool)
+	if !ok {
+		setting.PanicInDevOrTesting("ShowOutdatedComments is not set in context data or is not a bool")
+	}
+	return show
 }

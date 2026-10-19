@@ -3,7 +3,7 @@
 
 package types
 
-import "code.gitea.io/gitea/modules/translation"
+import "gitea.dev/modules/translation"
 
 type OwnerType string
 
@@ -17,13 +17,13 @@ const (
 func (o OwnerType) LocaleString(locale translation.Locale) string {
 	switch o {
 	case OwnerTypeSystemGlobal:
-		return locale.Tr("concept_system_global")
+		return locale.TrString("concept_system_global")
 	case OwnerTypeIndividual:
-		return locale.Tr("concept_user_individual")
+		return locale.TrString("concept_user_user")
 	case OwnerTypeRepository:
-		return locale.Tr("concept_code_repository")
+		return locale.TrString("concept_code_repository")
 	case OwnerTypeOrganization:
-		return locale.Tr("concept_user_organization")
+		return locale.TrString("concept_user_organization")
 	}
-	return locale.Tr("unknown")
+	return locale.TrString("unknown")
 }

@@ -4,14 +4,17 @@
 package packages
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"net/url"
 	"path"
 	"strings"
 
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/storage"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/storage"
+	"gitea.dev/modules/util"
 )
 
 // BlobHash256Key is the key to address a blob content
@@ -28,24 +31,27 @@ func NewContentStore() *ContentStore {
 	return contentStore
 }
 
-// Get gets a package blob
-func (s *ContentStore) Get(key BlobHash256Key) (storage.Object, error) {
+func (s *ContentStore) OpenBlob(key BlobHash256Key) (storage.Object, error) {
 	return s.store.Open(KeyToRelativePath(key))
 }
 
 func (s *ContentStore) ShouldServeDirect() bool {
-	return setting.Packages.Storage.MinioConfig.ServeDirect
+	return setting.Packages.Storage.ServeDirect()
 }
 
-func (s *ContentStore) GetServeDirectURL(key BlobHash256Key, filename string) (*url.URL, error) {
-	return s.store.URL(KeyToRelativePath(key), filename)
+func (s *ContentStore) GetServeDirectURL(key BlobHash256Key, filename, method string, reqParams *storage.ServeDirectOptions) (*url.URL, error) {
+	return s.store.ServeDirectURL(KeyToRelativePath(key), filename, method, reqParams)
 }
 
-// FIXME: Workaround to be removed in v1.20
-// https://github.com/go-gitea/gitea/issues/19586
-func (s *ContentStore) Has(key BlobHash256Key) error {
-	_, err := s.store.Stat(KeyToRelativePath(key))
-	return err
+func (s *ContentStore) OptionalSize(key BlobHash256Key) (sz optional.Option[int64], _ error) {
+	st, err := s.store.Stat(KeyToRelativePath(key))
+	if errors.Is(err, fs.ErrNotExist) {
+		return sz, nil
+	}
+	if err != nil {
+		return sz, err
+	}
+	return optional.Some(st.Size()), nil
 }
 
 // Save stores a package blob

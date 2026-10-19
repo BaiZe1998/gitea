@@ -45,3 +45,29 @@
   type: 2
   created_unix: 1688973000
   updated_unix: 1688973000
+
+-
+  id: 5
+  title: project without default column
+  owner_id: 2
+  repo_id: 0
+  is_closed: false
+  creator_id: 2
+  board_type: 1
+  type: 2
+  created_unix: 1688973000
+  updated_unix: 1688973000
+
+-
+  id: 6
+  title: project with multiple default columns
+  owner_id: 2
+  repo_id: 0
+  is_closed: false
+  creator_id: 2
+  board_type: 1
+  type: 2
+  created_unix: 1688973000
+  updated_unix: 1688973000
+
+# DO NOT add more test data in the fixtures, test case should prepare their own test data separately and clearly

@@ -7,8 +7,8 @@ import (
 	"context"
 	"strings"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/optional"
 
 	"xorm.io/builder"
 )
@@ -24,11 +24,23 @@ func (milestones MilestoneList) getMilestoneIDs() []int64 {
 	return ids
 }
 
+// SplitByOpenClosed splits the milestone list into open and closed milestones
+func (milestones MilestoneList) SplitByOpenClosed() (open, closed MilestoneList) {
+	for _, m := range milestones {
+		if m.IsClosed {
+			closed = append(closed, m)
+		} else {
+			open = append(open, m)
+		}
+	}
+	return open, closed
+}
+
 // FindMilestoneOptions contain options to get milestones
 type FindMilestoneOptions struct {
 	db.ListOptions
 	RepoID   int64
-	IsClosed util.OptionalBool
+	IsClosed optional.Option[bool]
 	Name     string
 	SortType string
 	RepoCond builder.Cond
@@ -40,8 +52,8 @@ func (opts FindMilestoneOptions) ToConds() builder.Cond {
 	if opts.RepoID != 0 {
 		cond = cond.And(builder.Eq{"repo_id": opts.RepoID})
 	}
-	if opts.IsClosed != util.OptionalBoolNone {
-		cond = cond.And(builder.Eq{"is_closed": opts.IsClosed.IsTrue()})
+	if opts.IsClosed.Has() {
+		cond = cond.And(builder.Eq{"is_closed": opts.IsClosed.Value()})
 	}
 	if opts.RepoCond != nil && opts.RepoCond.IsValid() {
 		cond = cond.And(builder.In("repo_id", builder.Select("id").From("repository").Where(opts.RepoCond)))
@@ -70,8 +82,10 @@ func (opts FindMilestoneOptions) ToOrders() string {
 		return "num_issues DESC"
 	case "id":
 		return "id ASC"
+	case "name":
+		return "name DESC"
 	default:
-		return "deadline_unix ASC, id ASC"
+		return "deadline_unix ASC, name ASC"
 	}
 }
 
@@ -99,36 +113,29 @@ func (milestones MilestoneList) LoadTotalTrackedTimes(ctx context.Context) error
 	trackedTimes := make(map[int64]int64, len(milestones))
 
 	// Get total tracked time by milestone_id
-	rows, err := db.GetEngine(ctx).Table("issue").
+	var totalTimesByMilestones []*totalTimesByMilestone
+	err := db.GetEngine(ctx).Table("issue").
 		Join("INNER", "milestone", "issue.milestone_id = milestone.id").
 		Join("LEFT", "tracked_time", "tracked_time.issue_id = issue.id").
 		Where("tracked_time.deleted = ?", false).
 		Select("milestone_id, sum(time) as time").
 		In("milestone_id", milestones.getMilestoneIDs()).
 		GroupBy("milestone_id").
-		Rows(new(totalTimesByMilestone))
+		Find(&totalTimesByMilestones)
 	if err != nil {
 		return err
 	}
 
-	defer rows.Close()
-
-	for rows.Next() {
-		var totalTime totalTimesByMilestone
-		err = rows.Scan(&totalTime)
-		if err != nil {
-			return err
-		}
+	for _, totalTime := range totalTimesByMilestones {
 		trackedTimes[totalTime.MilestoneID] = totalTime.Time
 	}
-
 	for _, milestone := range milestones {
 		milestone.TotalTrackedTime = trackedTimes[milestone.ID]
 	}
 	return nil
 }
 
-// CountMilestonesByRepoCondAndKw map from repo conditions and the keyword of milestones' name to number of milestones matching the options`
+// CountMilestonesMap map from repo conditions and the keyword of milestones' name to number of milestones matching the options`
 func CountMilestonesMap(ctx context.Context, opts FindMilestoneOptions) (map[int64]int64, error) {
 	sess := db.GetEngine(ctx).Where(opts.ToConds())
 

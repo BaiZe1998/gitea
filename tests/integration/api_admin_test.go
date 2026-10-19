@@ -9,13 +9,16 @@ import (
 	"testing"
 	"time"
 
-	asymkey_model "code.gitea.io/gitea/models/asymkey"
-	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/json"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/tests"
+	asymkey_model "gitea.dev/models/asymkey"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/glob"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/setting"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/test"
+	"gitea.dev/tests"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -34,8 +37,7 @@ func TestAPIAdminCreateAndDeleteSSHKey(t *testing.T) {
 	}).AddTokenAuth(token)
 	resp := MakeRequest(t, req, http.StatusCreated)
 
-	var newPublicKey api.PublicKey
-	DecodeJSON(t, resp, &newPublicKey)
+	newPublicKey := DecodeJSON(t, resp, &api.PublicKey{})
 	unittest.AssertExistsAndLoadBean(t, &asymkey_model.PublicKey{
 		ID:          newPublicKey.ID,
 		Name:        newPublicKey.Title,
@@ -71,10 +73,9 @@ func TestAPIAdminDeleteUnauthorizedKey(t *testing.T) {
 		"title": "test-key",
 	}).AddTokenAuth(token)
 	resp := MakeRequest(t, req, http.StatusCreated)
-	var newPublicKey api.PublicKey
-	DecodeJSON(t, resp, &newPublicKey)
+	newPublicKey := DecodeJSON(t, resp, &api.PublicKey{})
 
-	token = getUserToken(t, normalUsername)
+	token = getUserToken(t, normalUsername, auth_model.AccessTokenScopeAll)
 	req = NewRequestf(t, "DELETE", "/api/v1/admin/users/%s/keys/%d", adminUsername, newPublicKey.ID).
 		AddTokenAuth(token)
 	MakeRequest(t, req, http.StatusForbidden)
@@ -86,11 +87,10 @@ func TestAPISudoUser(t *testing.T) {
 	normalUsername := "user2"
 	token := getUserToken(t, adminUsername, auth_model.AccessTokenScopeReadUser)
 
-	req := NewRequest(t, "GET", fmt.Sprintf("/api/v1/user?sudo=%s", normalUsername)).
+	req := NewRequest(t, "GET", "/api/v1/user?sudo="+normalUsername).
 		AddTokenAuth(token)
 	resp := MakeRequest(t, req, http.StatusOK)
-	var user api.User
-	DecodeJSON(t, resp, &user)
+	user := DecodeJSON(t, resp, &api.User{})
 
 	assert.Equal(t, normalUsername, user.UserName)
 }
@@ -101,7 +101,7 @@ func TestAPISudoUserForbidden(t *testing.T) {
 	normalUsername := "user2"
 
 	token := getUserToken(t, normalUsername, auth_model.AccessTokenScopeReadAdmin)
-	req := NewRequest(t, "GET", fmt.Sprintf("/api/v1/user?sudo=%s", adminUsername)).
+	req := NewRequest(t, "GET", "/api/v1/user?sudo="+adminUsername).
 		AddTokenAuth(token)
 	MakeRequest(t, req, http.StatusForbidden)
 }
@@ -114,8 +114,7 @@ func TestAPIListUsers(t *testing.T) {
 	req := NewRequest(t, "GET", "/api/v1/admin/users").
 		AddTokenAuth(token)
 	resp := MakeRequest(t, req, http.StatusOK)
-	var users []api.User
-	DecodeJSON(t, resp, &users)
+	users := DecodeJSON(t, resp, []api.User{})
 
 	found := false
 	for _, user := range users {
@@ -137,7 +136,7 @@ func TestAPIListUsersNotLoggedIn(t *testing.T) {
 func TestAPIListUsersNonAdmin(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
 	nonAdminUsername := "user2"
-	token := getUserToken(t, nonAdminUsername)
+	token := getUserToken(t, nonAdminUsername, auth_model.AccessTokenScopeAll)
 	req := NewRequest(t, "GET", "/api/v1/admin/users").
 		AddTokenAuth(token)
 	MakeRequest(t, req, http.StatusForbidden)
@@ -191,39 +190,30 @@ func TestAPIEditUser(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
 	adminUsername := "user1"
 	token := getUserToken(t, adminUsername, auth_model.AccessTokenScopeWriteAdmin)
-	urlStr := fmt.Sprintf("/api/v1/admin/users/%s", "user2")
+	urlStr := "/api/v1/admin/users/" + "user2"
 
+	fullNameToChange := "Full Name User 2"
 	req := NewRequestWithValues(t, "PATCH", urlStr, map[string]string{
 		// required
 		"login_name": "user2",
 		"source_id":  "0",
 		// to change
-		"full_name": "Full Name User 2",
+		"full_name": fullNameToChange,
 	}).AddTokenAuth(token)
 	MakeRequest(t, req, http.StatusOK)
+	user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{LoginName: "user2"})
+	assert.Equal(t, fullNameToChange, user2.FullName)
 
-	empty := ""
-	req = NewRequestWithJSON(t, "PATCH", urlStr, api.EditUserOption{
-		LoginName: "user2",
-		SourceID:  0,
-		Email:     &empty,
-	}).AddTokenAuth(token)
-	resp := MakeRequest(t, req, http.StatusUnprocessableEntity)
+	req = NewRequestWithJSON(t, "PATCH", urlStr, api.EditUserOption{SourceID: 0, Email: new("")}).AddTokenAuth(token)
+	resp := MakeRequest(t, req, http.StatusBadRequest)
 
 	errMap := make(map[string]any)
 	json.Unmarshal(resp.Body.Bytes(), &errMap)
-	assert.EqualValues(t, "email is not allowed to be empty string", errMap["message"].(string))
+	assert.Equal(t, "email address is invalid: ", errMap["message"])
 
-	user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{LoginName: "user2"})
+	user2 = unittest.AssertExistsAndLoadBean(t, &user_model.User{LoginName: "user2"})
 	assert.False(t, user2.IsRestricted)
-	bTrue := true
-	req = NewRequestWithJSON(t, "PATCH", urlStr, api.EditUserOption{
-		// required
-		LoginName: "user2",
-		SourceID:  0,
-		// to change
-		Restricted: &bTrue,
-	}).AddTokenAuth(token)
+	req = NewRequestWithJSON(t, "PATCH", urlStr, api.EditUserOption{Restricted: new(true)}).AddTokenAuth(token)
 	MakeRequest(t, req, http.StatusOK)
 	user2 = unittest.AssertExistsAndLoadBean(t, &user_model.User{LoginName: "user2"})
 	assert.True(t, user2.IsRestricted)
@@ -254,14 +244,14 @@ func TestAPIRenameUser(t *testing.T) {
 		// required
 		"new_name": "User2",
 	}).AddTokenAuth(token)
-	MakeRequest(t, req, http.StatusOK)
+	MakeRequest(t, req, http.StatusNoContent)
 
 	urlStr = fmt.Sprintf("/api/v1/admin/users/%s/rename", "User2")
 	req = NewRequestWithValues(t, "POST", urlStr, map[string]string{
 		// required
 		"new_name": "User2-2-2",
 	}).AddTokenAuth(token)
-	MakeRequest(t, req, http.StatusOK)
+	MakeRequest(t, req, http.StatusNoContent)
 
 	req = NewRequestWithValues(t, "POST", urlStr, map[string]string{
 		// required
@@ -281,7 +271,7 @@ func TestAPIRenameUser(t *testing.T) {
 		// required
 		"new_name": "user2",
 	}).AddTokenAuth(token)
-	MakeRequest(t, req, http.StatusOK)
+	MakeRequest(t, req, http.StatusNoContent)
 }
 
 func TestAPICron(t *testing.T) {
@@ -299,11 +289,10 @@ func TestAPICron(t *testing.T) {
 			AddTokenAuth(token)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		assert.Equal(t, "28", resp.Header().Get("X-Total-Count"))
+		assert.Equal(t, "30", resp.Header().Get("X-Total-Count"))
 
-		var crons []api.Cron
-		DecodeJSON(t, resp, &crons)
-		assert.Len(t, crons, 28)
+		crons := DecodeJSON(t, resp, []api.Cron{})
+		assert.Len(t, crons, 30)
 	})
 
 	t.Run("Execute", func(t *testing.T) {
@@ -323,8 +312,7 @@ func TestAPICron(t *testing.T) {
 			AddTokenAuth(token)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var crons []api.Cron
-		DecodeJSON(t, resp, &crons)
+		crons := DecodeJSON(t, resp, []api.Cron{})
 
 		for _, cron := range crons {
 			if cron.Name == "archive_cleanup" {
@@ -332,4 +320,43 @@ func TestAPICron(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestAPICreateUser_NotAllowedEmailDomain(t *testing.T) {
+	defer tests.PrepareTestEnv(t)()
+	defer test.MockVariableValue(&setting.Service.EmailDomainAllowList, []glob.Glob{glob.MustCompile("example.org")})()
+
+	adminUsername := "user1"
+	token := getUserToken(t, adminUsername, auth_model.AccessTokenScopeWriteAdmin)
+
+	req := NewRequestWithValues(t, "POST", "/api/v1/admin/users", map[string]string{
+		"email":                "allowedUser1@example1.org",
+		"login_name":           "allowedUser1",
+		"username":             "allowedUser1",
+		"password":             "allowedUser1_pass",
+		"must_change_password": "true",
+	}).AddTokenAuth(token)
+	resp := MakeRequest(t, req, http.StatusCreated)
+	assert.Equal(t, "the domain of user email allowedUser1@example1.org conflicts with EMAIL_DOMAIN_ALLOWLIST or EMAIL_DOMAIN_BLOCKLIST", resp.Header().Get("X-Gitea-Warning"))
+
+	req = NewRequest(t, "DELETE", "/api/v1/admin/users/allowedUser1").AddTokenAuth(token)
+	MakeRequest(t, req, http.StatusNoContent)
+}
+
+func TestAPIEditUser_NotAllowedEmailDomain(t *testing.T) {
+	defer tests.PrepareTestEnv(t)()
+	defer test.MockVariableValue(&setting.Service.EmailDomainAllowList, []glob.Glob{glob.MustCompile("example.org")})()
+
+	adminUsername := "user1"
+	token := getUserToken(t, adminUsername, auth_model.AccessTokenScopeWriteAdmin)
+	urlStr := "/api/v1/admin/users/user2"
+
+	req := NewRequestWithJSON(t, "PATCH", urlStr, api.EditUserOption{Email: new("user2@example1.com")}).AddTokenAuth(token)
+	resp := MakeRequest(t, req, http.StatusBadRequest)
+	errMap := make(map[string]string)
+	assert.NoError(t, json.Unmarshal(resp.Body.Bytes(), &errMap))
+	assert.Equal(t, "email domain is not allowed: user2@example1.com", errMap["message"])
+
+	req = NewRequestWithJSON(t, "PATCH", urlStr, api.EditUserOption{Email: new("user2@example.org")}).AddTokenAuth(token)
+	MakeRequest(t, req, http.StatusOK)
 }

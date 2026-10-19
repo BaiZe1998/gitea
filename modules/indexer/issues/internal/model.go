@@ -4,9 +4,12 @@
 package internal
 
 import (
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
+	"strconv"
+
+	"gitea.dev/models/db"
+	"gitea.dev/modules/indexer"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/timeutil"
 )
 
 // IndexerData data stored in the issue indexer
@@ -23,13 +26,16 @@ type IndexerData struct {
 	// Fields used for filtering
 	IsPull             bool               `json:"is_pull"`
 	IsClosed           bool               `json:"is_closed"`
+	IsArchived         bool               `json:"is_archived"`
 	LabelIDs           []int64            `json:"label_ids"`
 	NoLabel            bool               `json:"no_label"` // True if LabelIDs is empty
 	MilestoneID        int64              `json:"milestone_id"`
-	ProjectID          int64              `json:"project_id"`
-	ProjectBoardID     int64              `json:"project_board_id"`
+	ProjectIDs         []int64            `json:"project_ids"`
+	NoProject          bool               `json:"no_project"`                   // True if ProjectIDs is empty
+	ProjectColumnMap   map[int64]int64    `json:"project_column_map,omitempty"` // Maps project ID to column ID for each project the issue is in
 	PosterID           int64              `json:"poster_id"`
-	AssigneeID         int64              `json:"assignee_id"`
+	AssigneeIDs        []int64            `json:"assignee_ids"`
+	NoAssignee         bool               `json:"no_assignee"` // True if the issue has no assignees
 	MentionIDs         []int64            `json:"mention_ids"`
 	ReviewedIDs        []int64            `json:"reviewed_ids"`
 	ReviewRequestedIDs []int64            `json:"review_requested_ids"`
@@ -74,11 +80,14 @@ type SearchResult struct {
 type SearchOptions struct {
 	Keyword string // keyword to search
 
+	SearchMode indexer.SearchModeType
+
 	RepoIDs   []int64 // repository IDs which the issues belong to
 	AllPublic bool    // if include all public repositories
 
-	IsPull   util.OptionalBool // if the issues is a pull request
-	IsClosed util.OptionalBool // if the issues is closed
+	IsPull     optional.Option[bool] // if the issues is a pull request
+	IsClosed   optional.Option[bool] // if the issues is closed
+	IsArchived optional.Option[bool] // if the repo is archived
 
 	IncludedLabelIDs    []int64 // labels the issues have
 	ExcludedLabelIDs    []int64 // labels the issues don't have
@@ -87,24 +96,23 @@ type SearchOptions struct {
 
 	MilestoneIDs []int64 // milestones the issues have
 
-	ProjectID      *int64 // project the issues belong to
-	ProjectBoardID *int64 // project board the issues belong to
+	ProjectIDs    []int64 // project the issues belong to. FIXME: ISSUE-MULTIPLE-PROJECTS-FILTER: no multiple project filter support yet. Search logic is wrong.
+	NoProjectOnly bool    // if the issues have no project, if true, ProjectIDs will be ignored
 
-	PosterID *int64 // poster of the issues
+	PosterID   string // poster of the issues, "(none)" or "(any)" or a user ID
+	AssigneeID string // assignee of the issues, "(none)" or "(any)" or a user ID
 
-	AssigneeID *int64 // assignee of the issues, zero means no assignee
+	MentionID optional.Option[int64] // mentioned user of the issues
 
-	MentionID *int64 // mentioned user of the issues
+	ReviewedID        optional.Option[int64] // reviewer of the issues
+	ReviewRequestedID optional.Option[int64] // requested reviewer of the issues
 
-	ReviewedID        *int64 // reviewer of the issues
-	ReviewRequestedID *int64 // requested reviewer of the issues
+	SubscriberID optional.Option[int64] // subscriber of the issues
 
-	SubscriberID *int64 // subscriber of the issues
+	UpdatedAfterUnix  optional.Option[int64]
+	UpdatedBeforeUnix optional.Option[int64]
 
-	UpdatedAfterUnix  *int64
-	UpdatedBeforeUnix *int64
-
-	db.Paginator
+	Paginator *db.ListOptions
 
 	SortBy SortBy // sort by field
 }
@@ -120,6 +128,12 @@ func (o *SearchOptions) Copy(edit ...func(options *SearchOptions)) *SearchOption
 		e(&v)
 	}
 	return &v
+}
+
+// used for optimized issue index based search
+func (o *SearchOptions) IsKeywordNumeric() bool {
+	_, err := strconv.Atoi(o.Keyword)
+	return err == nil
 }
 
 type SortBy string
